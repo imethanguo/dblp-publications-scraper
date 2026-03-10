@@ -114,7 +114,21 @@ Run:
 
 Use commands with `./` from the project root, such as `./sp g` and `./sp i`.
 
-### 3) `OSError: [Errno 48] Address already in use`
+### 3) `bash: ./sp: Permission denied`
+
+`sp` is a script and needs execute permission. In the project root, run:
+
+```bash
+chmod +x ./sp
+```
+
+Then run your command again, for example:
+
+```bash
+./sp i
+```
+
+### 4) `OSError: [Errno 48] Address already in use`
 
 The GUI port is occupied. Run:
 
