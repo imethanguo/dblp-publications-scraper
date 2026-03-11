@@ -1,4 +1,5 @@
 import requests
+from requests.adapters import HTTPAdapter
 from bs4 import BeautifulSoup
 import json
 import re
@@ -10,6 +11,7 @@ import os
 import sys
 import signal
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 REQUEST_TIMEOUT = 10
 REQUEST_RETRIES = 6
@@ -24,6 +26,10 @@ REQUEST_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
 }
+
+HTTP_SESSION = requests.Session()
+HTTP_SESSION.mount("http://", HTTPAdapter(pool_connections=32, pool_maxsize=32))
+HTTP_SESSION.mount("https://", HTTPAdapter(pool_connections=32, pool_maxsize=32))
 
 
 class PublicationTimeout(BaseException):
@@ -58,7 +64,7 @@ def get_url_text_with_options(url, timeout_seconds, retries, retry_sleep_seconds
     last_exception = None
     for attempt in range(max(1, int(retries or 1))):
         try:
-            response = requests.get(url, timeout=timeout_seconds, headers=REQUEST_HEADERS)
+            response = HTTP_SESSION.get(url, timeout=timeout_seconds, headers=REQUEST_HEADERS)
             if response.status_code == 200:
                 return response.text
         except Exception as exc:
@@ -326,7 +332,7 @@ def fetch_metadata_from_crossref(paper_url):
 
     crossref_url = f"https://api.crossref.org/works/{doi}"
     try:
-        response = requests.get(crossref_url, timeout=REQUEST_TIMEOUT, headers=REQUEST_HEADERS)
+        response = HTTP_SESSION.get(crossref_url, timeout=REQUEST_TIMEOUT, headers=REQUEST_HEADERS)
         if response.status_code != 200:
             return metadata
 
@@ -376,7 +382,7 @@ def fetch_metadata_from_openalex(paper_url):
     last_error = None
     for attempt in range(REQUEST_RETRIES):
         try:
-            response = requests.get(openalex_url, timeout=REQUEST_TIMEOUT, headers=REQUEST_HEADERS)
+            response = HTTP_SESSION.get(openalex_url, timeout=REQUEST_TIMEOUT, headers=REQUEST_HEADERS)
             if response.status_code != 200:
                 if attempt < REQUEST_RETRIES - 1 and response.status_code >= 500:
                     time.sleep(RETRY_SLEEP_SECONDS)
@@ -485,7 +491,7 @@ def fetch_metadata_from_arxiv_url(paper_url):
         return metadata
 
     try:
-        response = requests.get(arxiv_abs_url, timeout=8, headers=REQUEST_HEADERS)
+        response = HTTP_SESSION.get(arxiv_abs_url, timeout=8, headers=REQUEST_HEADERS)
         if response.status_code != 200:
             return metadata
 
@@ -523,7 +529,7 @@ def recover_arxiv_metadata_quick(publication):
         return publication
 
     try:
-        response = requests.get(arxiv_abs_url, timeout=8, headers=REQUEST_HEADERS)
+        response = HTTP_SESSION.get(arxiv_abs_url, timeout=8, headers=REQUEST_HEADERS)
         if response.status_code != 200:
             return publication
 
@@ -843,12 +849,11 @@ def scrape_dblp_publications(url, include_arxiv=False, start_date=""):
     Returns:
         list: A list of dictionaries containing publication information.
     """
-    session = requests.Session()
-    response = session.get(url, timeout=REQUEST_TIMEOUT)
-    if response.status_code != 200:
-        raise Exception(f"Failed to fetch URL: {url}, Status Code: {response.status_code}")
+    page_text = get_url_text(url)
+    if not page_text:
+        raise Exception(f"Failed to fetch URL after retries: {url}")
 
-    soup = BeautifulSoup(response.content, 'html.parser')
+    soup = BeautifulSoup(page_text, 'html.parser')
 
     # Find all publication entries
     publications = []
@@ -911,25 +916,41 @@ def scrape_dblp_publications(url, include_arxiv=False, start_date=""):
         if bibtex_view_url:
             bibtex_view_urls.append(bibtex_view_url)
 
-    for publication in publications:
-        title = publication.get("title", "")
+    def _enrich_single(pub):
+        title = pub.get("title", "")
         try:
-            run_with_publication_timeout(
-                enrich_publication,
-                PER_PUBLICATION_TIMEOUT_SECONDS,
-                publication,
-                include_arxiv,
-                start_date,
-            )
+            if MAX_WORKERS <= 1:
+                run_with_publication_timeout(
+                    enrich_publication,
+                    PER_PUBLICATION_TIMEOUT_SECONDS,
+                    pub,
+                    include_arxiv,
+                    start_date,
+                )
+            else:
+                enrich_publication(pub, include_arxiv, start_date)
         except PublicationTimeout:
             print(f"抓取超时({PER_PUBLICATION_TIMEOUT_SECONDS}s): {title}")
-            recover_arxiv_metadata_quick(publication)
-            partial_content = {k: v for k, v in publication.items() if v}
+            recover_arxiv_metadata_quick(pub)
+            partial_content = {k: v for k, v in pub.items() if v}
             print("已抓取到的content:")
             print(json.dumps(partial_content, ensure_ascii=False, indent=2))
-            publication.pop("bibtexViewUrl", None)
-            publication.pop("dblpIssueUrl", None)
+            pub.pop("bibtexViewUrl", None)
+            pub.pop("dblpIssueUrl", None)
+        except Exception as exc:
+            print(f"抓取异常: {title} -> {exc}")
+            pub.pop("bibtexViewUrl", None)
+            pub.pop("dblpIssueUrl", None)
 
+    workers = max(1, int(MAX_WORKERS or 1))
+    if workers > 1:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            list(executor.map(_enrich_single, publications))
+    else:
+        for publication in publications:
+            _enrich_single(publication)
+
+    for publication in publications:
         if publication.get("skip"):
             continue
 
@@ -946,7 +967,8 @@ def scrape_dblp_publications(url, include_arxiv=False, start_date=""):
         print(f"抓取完成: {title}")
         print(f"成功项: {', '.join(success_keys) if success_keys else '无'}")
         print(f"未成功项: {', '.join(empty_keys) if empty_keys else '无'}")
-        time.sleep(PER_ITEM_SLEEP_SECONDS)
+        if PER_ITEM_SLEEP_SECONDS > 0:
+            time.sleep(PER_ITEM_SLEEP_SECONDS)
 
     return publications, bibtex_view_urls
 
@@ -1024,6 +1046,8 @@ def prefer_scalar(existing_value, incoming_value):
 
 def merge_publication_items(existing_item, incoming_item):
     existing_item["authors"] = merge_unique_list(existing_item.get("authors", []), incoming_item.get("authors", []))
+    existing_item["tags"] = merge_unique_list(existing_item.get("tags", []), incoming_item.get("tags", []))
+    existing_item["awards"] = merge_unique_list(existing_item.get("awards", []), incoming_item.get("awards", []))
 
     for key in ["title", "date", "venue", "venueShort", "abstract", "bibtex", "paperUrl", "arxivUrl"]:
         existing_item[key] = prefer_scalar(existing_item.get(key, ""), incoming_item.get(key, ""))
@@ -1111,8 +1135,10 @@ def merge_into_existing_js_file(existing_js_filepath, new_publications):
 
     merged_data = [merged_by_key[key] for key in ordered_keys]
     for item in merged_data:
-        item.pop("tags", None)
-        item.pop("awards", None)
+        if not isinstance(item.get("tags"), list):
+            item["tags"] = []
+        if not isinstance(item.get("awards"), list):
+            item["awards"] = []
     save_to_js(merged_data, existing_js_filepath)
 
     print(f"Merged into existing JS file: added {len(added_titles)}, deduplicated {len(deduped_titles)}.")
@@ -1178,7 +1204,21 @@ def run_scrape_flow(
     include_arxiv_input,
     start_date_input,
     existing_js_path="",
+    max_workers=None,
+    per_item_sleep_seconds=None,
 ):
+    global MAX_WORKERS, PER_ITEM_SLEEP_SECONDS
+    if max_workers is not None:
+        try:
+            MAX_WORKERS = max(1, int(max_workers))
+        except Exception:
+            MAX_WORKERS = 1
+    if per_item_sleep_seconds is not None:
+        try:
+            PER_ITEM_SLEEP_SECONDS = max(0.0, float(per_item_sleep_seconds))
+        except Exception:
+            PER_ITEM_SLEEP_SECONDS = 1.0
+
     url = (url or "").strip() or DEFAULT_DBLP_URL
     if not re.match(r"^https://dblp\.org/pid/[^/]+/[^/]+\.html$", url):
         print("错误：网址格式不正确，示例：https://dblp.org/pid/c/SCCheung.html")
@@ -1197,8 +1237,7 @@ def run_scrape_flow(
 
     author_name = extract_author_name_from_dblp(url)
     if not author_name:
-        print("错误：无法从该网址提取作者姓名")
-        return 1
+        print("警告：无法从该网址提取作者姓名，继续抓取。")
     try:
         publications, bibtex_view_urls = scrape_dblp_publications(
             url,
@@ -1260,6 +1299,8 @@ def load_run_config(config_path):
         "include_arxiv_input": _to_yes_no_text(config_data.get("include_arxiv", "n")),
         "start_date_input": str(config_data.get("start_date", "") or "").strip(),
         "existing_js_path": str(config_data.get("existing_js_path", "") or "").strip(),
+        "max_workers": config_data.get("max_workers", MAX_WORKERS),
+        "per_item_sleep_seconds": config_data.get("per_item_sleep_seconds", PER_ITEM_SLEEP_SECONDS),
     }
 
 
@@ -1287,6 +1328,8 @@ def main():
         run_config["include_arxiv_input"],
         run_config["start_date_input"],
         existing_js_path=run_config["existing_js_path"],
+        max_workers=run_config["max_workers"],
+        per_item_sleep_seconds=run_config["per_item_sleep_seconds"],
     )
     if exit_code != 0:
         sys.exit(exit_code)

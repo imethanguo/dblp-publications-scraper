@@ -7,6 +7,8 @@ module.exports = [
         ],
         venue: "Full name of the conference or journal name",
         venueShort: "abbreviation of conference or journal, e.g., ESEC/FSE",
+        tags: [],
+        awards: [],
         abstract: `
             (optional) abstract of your paper (support multiline)
         `,

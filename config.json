@@ -9,5 +9,11 @@
   "start_date": "2025",
 
   "_comment_4": "Absolute path to an existing .js file (must exist)",
-  "existing_js_path": "collection/merged_collection.js"
+  "existing_js_path": "/Users/guoyiheng/selected-publications/collection/merged_collection.js",
+
+  "_comment_5": "Parallel workers for enrichment (1 keeps old behavior; 4-8 is usually faster)",
+  "max_workers": 4,
+
+  "_comment_6": "Sleep seconds after each item log (0 is fastest)",
+  "per_item_sleep_seconds": 0
 }
