@@ -9,5 +9,5 @@
   "start_date": "2025",
 
   "_comment_4": "Absolute path to an existing .js file (must exist)",
-  "existing_js_path": "/Users/guoyiheng/dblp-publications-scraper/my.js"
+  "existing_js_path": "collection/merged_collection.js"
 }
