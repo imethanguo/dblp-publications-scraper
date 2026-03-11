@@ -4,17 +4,12 @@ import json
 import re
 import argparse
 from datetime import datetime
-from urllib.parse import urljoin, parse_qs, urlparse
+from urllib.parse import urljoin
 import time
 import os
 import sys
-import subprocess
 import signal
 import threading
-import webbrowser
-import uuid
-from contextlib import redirect_stdout, redirect_stderr
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 REQUEST_TIMEOUT = 10
 REQUEST_RETRIES = 6
@@ -23,6 +18,7 @@ PER_ITEM_SLEEP_SECONDS = 1.0
 PER_PUBLICATION_TIMEOUT_SECONDS = 20
 MAX_WORKERS = 1
 DEFAULT_DBLP_URL = "https://dblp.org/pid/c/SCCheung.html"
+DEFAULT_CONFIG_FILENAME = "config.json"
 REQUEST_HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; PublicationScraper/1.0; +https://dblp.org)",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -55,16 +51,20 @@ def run_with_publication_timeout(func, timeout_seconds, *args, **kwargs):
 
 
 def get_url_text(url):
+    return get_url_text_with_options(url, REQUEST_TIMEOUT, REQUEST_RETRIES, RETRY_SLEEP_SECONDS)
+
+
+def get_url_text_with_options(url, timeout_seconds, retries, retry_sleep_seconds):
     last_exception = None
-    for attempt in range(REQUEST_RETRIES):
+    for attempt in range(max(1, int(retries or 1))):
         try:
-            response = requests.get(url, timeout=REQUEST_TIMEOUT, headers=REQUEST_HEADERS)
+            response = requests.get(url, timeout=timeout_seconds, headers=REQUEST_HEADERS)
             if response.status_code == 200:
                 return response.text
         except Exception as exc:
             last_exception = exc
-        if attempt < REQUEST_RETRIES - 1:
-            time.sleep(RETRY_SLEEP_SECONDS)
+        if attempt < max(1, int(retries or 1)) - 1:
+            time.sleep(retry_sleep_seconds)
     if last_exception:
         return ""
     return ""
@@ -148,25 +148,24 @@ def parse_include_arxiv_input(raw_value):
     return False
 
 
-def is_on_or_after_start_date(date_str, start_date_str):
-    if not start_date_str:
-        return True
+def parse_start_year(raw_value):
+    text = str(raw_value or "").strip()
+    if not text:
+        return ""
+    if re.fullmatch(r"\d{4}", text):
+        return text
+    return ""
 
-    normalized_start_date = normalize_date(start_date_str)
-    if not normalized_start_date:
+
+def is_on_or_after_start_year(date_str, start_year):
+    if not start_year:
         return True
 
     normalized_publication_date = normalize_date(date_str)
     if not normalized_publication_date:
         return False
-
-    try:
-        publication_dt = datetime.strptime(normalized_publication_date, "%Y-%m-%d")
-        start_dt = datetime.strptime(normalized_start_date, "%Y-%m-%d")
-    except ValueError:
-        return False
-
-    return publication_dt >= start_dt
+    publication_year = normalized_publication_date[:4]
+    return publication_year >= start_year
 
 
 def extract_year_from_entry(entry):
@@ -190,11 +189,14 @@ def extract_year_from_entry(entry):
     return ""
 
 
-def extract_bibtex_from_view(bibtex_view_url):
+def extract_bibtex_from_view(bibtex_view_url, fast_mode=False):
     if not bibtex_view_url:
         return ""
     try:
-        bibtex_view_text = get_url_text(bibtex_view_url)
+        if fast_mode:
+            bibtex_view_text = get_url_text_with_options(bibtex_view_url, timeout_seconds=6, retries=1, retry_sleep_seconds=0)
+        else:
+            bibtex_view_text = get_url_text(bibtex_view_url)
         if not bibtex_view_text:
             return ""
         bibtex_text_match = re.search(r"@\w+\{[\s\S]+?\n\}", bibtex_view_text)
@@ -221,7 +223,10 @@ def extract_bibtex_from_view(bibtex_view_url):
         if not bib_url:
             return ""
 
-        bib_text = get_url_text(bib_url)
+        if fast_mode:
+            bib_text = get_url_text_with_options(bib_url, timeout_seconds=6, retries=1, retry_sleep_seconds=0)
+        else:
+            bib_text = get_url_text(bib_url)
         if not bib_text:
             return ""
         return bib_text.strip()
@@ -281,30 +286,136 @@ def extract_doi_from_url(url):
     if not url:
         return ""
     doi_match = re.search(r"doi\.org/(10\.[^\s?#]+/[^\s?#]+)", url, re.IGNORECASE)
+    if not doi_match:
+        doi_match = re.search(r"/doi/(10\.[^\s?#]+/[^\s?#]+)", url, re.IGNORECASE)
+    if not doi_match:
+        doi_match = re.search(r"\b(10\.[0-9]{4,9}/[^\s?#]+)\b", url, re.IGNORECASE)
     if doi_match:
         return doi_match.group(1).strip()
     return ""
 
 
-def fetch_abstract_from_crossref(paper_url):
+def parse_crossref_date(message):
+    if not isinstance(message, dict):
+        return ""
+
+    for key in ("published-print", "published-online", "issued", "created"):
+        date_obj = message.get(key, {}) if isinstance(message.get(key), dict) else {}
+        date_parts = date_obj.get("date-parts", []) if isinstance(date_obj, dict) else []
+        if not date_parts or not isinstance(date_parts, list):
+            continue
+        first = date_parts[0] if date_parts and isinstance(date_parts[0], list) else []
+        if not first:
+            continue
+        try:
+            year = int(first[0]) if len(first) >= 1 else 0
+            month = int(first[1]) if len(first) >= 2 else 1
+            day = int(first[2]) if len(first) >= 3 else 1
+            if year > 0:
+                return f"{year:04d}-{month:02d}-{day:02d}"
+        except Exception:
+            continue
+    return ""
+
+
+def fetch_metadata_from_crossref(paper_url):
+    metadata = {"abstract": "", "date": "", "tags": []}
     doi = extract_doi_from_url(paper_url)
     if not doi:
-        return ""
+        return metadata
+
     crossref_url = f"https://api.crossref.org/works/{doi}"
     try:
         response = requests.get(crossref_url, timeout=REQUEST_TIMEOUT, headers=REQUEST_HEADERS)
         if response.status_code != 200:
-            return ""
+            return metadata
+
         data = response.json()
         message = data.get("message", {}) if isinstance(data, dict) else {}
-        abstract = message.get("abstract", "")
-        if not abstract:
-            return ""
-        abstract = re.sub(r"<[^>]+>", " ", abstract)
-        abstract = re.sub(r"\s+", " ", abstract).strip()
-        return abstract
+        if not isinstance(message, dict):
+            return metadata
+
+        abstract = str(message.get("abstract", "") or "").strip()
+        if abstract:
+            abstract = re.sub(r"<[^>]+>", " ", abstract)
+            abstract = re.sub(r"\s+", " ", abstract).strip()
+            metadata["abstract"] = abstract
+
+        metadata["date"] = parse_crossref_date(message)
+
+        return metadata
     except Exception:
+        return metadata
+
+
+def reconstruct_abstract_from_inverted_index(inverted_index):
+    if not isinstance(inverted_index, dict):
         return ""
+    positioned_words = []
+    for word, positions in inverted_index.items():
+        if not isinstance(positions, list):
+            continue
+        for pos in positions:
+            try:
+                positioned_words.append((int(pos), str(word)))
+            except Exception:
+                continue
+    if not positioned_words:
+        return ""
+    positioned_words.sort(key=lambda item: item[0])
+    return re.sub(r"\s+", " ", " ".join(word for _, word in positioned_words)).strip()
+
+
+def fetch_metadata_from_openalex(paper_url):
+    metadata = {"abstract": "", "date": "", "tags": []}
+    doi = extract_doi_from_url(paper_url)
+    if not doi:
+        return metadata
+
+    openalex_url = f"https://api.openalex.org/works/https://doi.org/{doi}"
+    last_error = None
+    for attempt in range(REQUEST_RETRIES):
+        try:
+            response = requests.get(openalex_url, timeout=REQUEST_TIMEOUT, headers=REQUEST_HEADERS)
+            if response.status_code != 200:
+                if attempt < REQUEST_RETRIES - 1 and response.status_code >= 500:
+                    time.sleep(RETRY_SLEEP_SECONDS)
+                    continue
+                return metadata
+
+            data = response.json() if response.text else {}
+            if not isinstance(data, dict):
+                return metadata
+
+            abstract = reconstruct_abstract_from_inverted_index(data.get("abstract_inverted_index", {}))
+            metadata["abstract"] = abstract
+
+            publication_date = str(data.get("publication_date", "") or "").strip()
+            metadata["date"] = normalize_date(publication_date)
+
+            return metadata
+        except Exception as exc:
+            last_error = exc
+            if attempt < REQUEST_RETRIES - 1:
+                time.sleep(RETRY_SLEEP_SECONDS)
+    if last_error:
+        print(f"OpenAlex metadata fetch failed for DOI {doi}: {last_error}")
+    return metadata
+
+
+def is_challenge_page(page_text, page_soup):
+    title_text = ""
+    if page_soup and page_soup.title and page_soup.title.string:
+        title_text = page_soup.title.string.strip().lower()
+    text = (page_text or "").lower()
+    checks = ["just a moment", "cloudflare", "captcha", "access denied", "checking your browser"]
+    if any(marker in title_text for marker in checks):
+        return True
+    return any(marker in text for marker in checks)
+
+
+def fetch_abstract_from_crossref(paper_url):
+    return fetch_metadata_from_crossref(paper_url).get("abstract", "")
 
 
 def extract_arxiv_abs_url(publication):
@@ -328,6 +439,82 @@ def extract_arxiv_abs_url(publication):
             return f"https://arxiv.org/abs/{eprint_match.group(1)}"
 
     return ""
+
+
+def is_arxiv_like_url(url):
+    text = str(url or "").strip().lower()
+    if not text:
+        return False
+    if "arxiv.org/abs/" in text or "arxiv.org/pdf/" in text:
+        return True
+    if "doi.org/10.48550/arxiv." in text:
+        return True
+    if "arxiv." in text:
+        return True
+    return False
+
+
+def resolve_arxiv_abs_url_from_url(url):
+    text = str(url or "").strip()
+    if not text:
+        return ""
+
+    abs_match = re.search(r"arxiv\.org/abs/([0-9]{4}\.[0-9]{4,5}(?:v\d+)?)", text, re.IGNORECASE)
+    if abs_match:
+        return f"https://arxiv.org/abs/{abs_match.group(1)}"
+
+    pdf_match = re.search(r"arxiv\.org/pdf/([0-9]{4}\.[0-9]{4,5}(?:v\d+)?)(?:\.pdf)?", text, re.IGNORECASE)
+    if pdf_match:
+        return f"https://arxiv.org/abs/{pdf_match.group(1)}"
+
+    doi_match = re.search(r"10\.48550/arxiv\.([0-9]{4}\.[0-9]{4,5}(?:v\d+)?)", text, re.IGNORECASE)
+    if doi_match:
+        return f"https://arxiv.org/abs/{doi_match.group(1)}"
+
+    generic_match = re.search(r"arxiv\.([0-9]{4}\.[0-9]{4,5}(?:v\d+)?)", text, re.IGNORECASE)
+    if generic_match:
+        return f"https://arxiv.org/abs/{generic_match.group(1)}"
+
+    return ""
+
+
+def fetch_metadata_from_arxiv_url(paper_url):
+    metadata = {"abstract": "", "date": "", "tags": []}
+    arxiv_abs_url = resolve_arxiv_abs_url_from_url(paper_url)
+    if not arxiv_abs_url:
+        return metadata
+
+    try:
+        response = requests.get(arxiv_abs_url, timeout=8, headers=REQUEST_HEADERS)
+        if response.status_code != 200:
+            return metadata
+
+        page_text = response.text
+        page_soup = BeautifulSoup(page_text, "html.parser")
+
+        abstract_text = ""
+        abstract_block = page_soup.find("blockquote", class_=re.compile(r"abstract", re.IGNORECASE))
+        if abstract_block:
+            abstract_text = abstract_block.get_text(" ", strip=True)
+        if not abstract_text:
+            meta_description = page_soup.find("meta", attrs={"name": "description"})
+            if meta_description and meta_description.get("content"):
+                abstract_text = meta_description["content"].strip()
+        if abstract_text:
+            abstract_text = re.sub(r"^\s*Abstract\s*:\s*", "", abstract_text, flags=re.IGNORECASE).strip()
+            metadata["abstract"] = abstract_text
+
+        submitted_date = extract_arxiv_submitted_date(page_text)
+        if not submitted_date:
+            submitted_match = re.search(r"Submitted on (\d{1,2} \w+ \d{4})", page_text, re.IGNORECASE)
+            if submitted_match:
+                submitted_date = parse_human_readable_date(submitted_match.group(1))
+        metadata["date"] = submitted_date
+        metadata["tags"] = []
+    except Exception:
+        return metadata
+
+    return metadata
 
 
 def recover_arxiv_metadata_quick(publication):
@@ -367,10 +554,7 @@ def recover_arxiv_metadata_quick(publication):
             if submitted_date:
                 publication["date"] = submitted_date
 
-        if not publication.get("tags"):
-            subject_meta = page_soup.find("meta", attrs={"name": "citation_keywords"})
-            if subject_meta and subject_meta.get("content"):
-                publication["tags"] = [x.strip() for x in subject_meta["content"].split(",") if x.strip()]
+        publication["tags"] = []
     except Exception:
         return publication
 
@@ -404,11 +588,38 @@ def fetch_metadata_from_paper_url(paper_url):
     metadata = {"abstract": "", "date": "", "tags": []}
     if not paper_url:
         return metadata
+    if is_arxiv_like_url(paper_url):
+        return fetch_metadata_from_arxiv_url(paper_url)
     try:
         paper_text = get_url_text(paper_url)
         if not paper_text:
+            crossref_metadata = fetch_metadata_from_crossref(paper_url)
+            if not metadata.get("abstract"):
+                metadata["abstract"] = crossref_metadata.get("abstract", "")
+            if not metadata.get("date"):
+                metadata["date"] = crossref_metadata.get("date", "")
+
+            if not metadata.get("abstract"):
+                openalex_metadata = fetch_metadata_from_openalex(paper_url)
+                if not metadata.get("abstract"):
+                    metadata["abstract"] = openalex_metadata.get("abstract", "")
+                if not metadata.get("date"):
+                    metadata["date"] = openalex_metadata.get("date", "")
+
+            metadata["tags"] = []
             return metadata
         paper_soup = BeautifulSoup(paper_text, "html.parser")
+
+        if is_challenge_page(paper_text, paper_soup):
+            metadata = fetch_metadata_from_crossref(paper_url)
+            if not metadata.get("abstract"):
+                openalex_metadata = fetch_metadata_from_openalex(paper_url)
+                if not metadata.get("abstract"):
+                    metadata["abstract"] = openalex_metadata.get("abstract", "")
+                if not metadata.get("date"):
+                    metadata["date"] = openalex_metadata.get("date", "")
+            metadata["tags"] = []
+            return metadata
 
         abstract_text = ""
         if not abstract_text:
@@ -496,19 +707,22 @@ def fetch_metadata_from_paper_url(paper_url):
                 date_text = parse_human_readable_date(submitted_match.group(1))
         metadata["date"] = date_text
 
-        tags = []
-        keywords_meta = paper_soup.find("meta", attrs={"name": "citation_keywords"})
-        if keywords_meta and keywords_meta.get("content"):
-            tags = [t.strip() for t in keywords_meta["content"].split(",") if t.strip()]
-        if not tags:
-            keywords_meta = paper_soup.find("meta", attrs={"name": "keywords"})
-            if keywords_meta and keywords_meta.get("content"):
-                tags = [t.strip() for t in keywords_meta["content"].split(",") if t.strip()]
-        if not tags:
-            keywords_container = paper_soup.find("div", class_="keywords")
-            if keywords_container:
-                tags = [kw.text.strip() for kw in keywords_container.find_all("span") if kw.text.strip()]
-        metadata["tags"] = tags
+        metadata["tags"] = []
+
+        if (not metadata.get("abstract")) or (not metadata.get("date")):
+            crossref_metadata = fetch_metadata_from_crossref(paper_url)
+            if not metadata.get("abstract"):
+                metadata["abstract"] = crossref_metadata.get("abstract", "")
+            if not metadata.get("date"):
+                metadata["date"] = crossref_metadata.get("date", "")
+
+        if not metadata.get("abstract"):
+            openalex_metadata = fetch_metadata_from_openalex(paper_url)
+            if not metadata.get("abstract"):
+                metadata["abstract"] = openalex_metadata.get("abstract", "")
+            if not metadata.get("date"):
+                metadata["date"] = openalex_metadata.get("date", "")
+        metadata["tags"] = []
 
         return metadata
     except Exception:
@@ -538,19 +752,37 @@ def build_bibtex_view_url(href, base_url):
 
 def enrich_publication(publication, include_arxiv=False, start_date=""):
     paper_url = publication.get("paperUrl", "")
-    if paper_url and "arxiv" in paper_url.lower() and not publication.get("arxivUrl"):
+    if paper_url and is_arxiv_like_url(paper_url) and not publication.get("arxivUrl"):
         publication["arxivUrl"] = paper_url
+
+    if not include_arxiv and (
+        is_arxiv_like_url(publication.get("paperUrl", ""))
+        or is_arxiv_like_url(publication.get("arxivUrl", ""))
+    ):
+        publication["skip"] = True
+        publication.pop("bibtexViewUrl", None)
+        publication.pop("dblpIssueUrl", None)
+        return publication
 
     bibtex_view_url = publication.get("bibtexViewUrl", "")
     if bibtex_view_url:
-        publication["bibtex"] = extract_bibtex_from_view(bibtex_view_url)
+        is_arxiv_candidate = (
+            is_arxiv_like_url(publication.get("paperUrl", ""))
+            or is_arxiv_like_url(publication.get("arxivUrl", ""))
+        )
+        publication["bibtex"] = extract_bibtex_from_view(bibtex_view_url, fast_mode=is_arxiv_candidate)
 
     venue, venue_short = extract_venue_from_bibtex(publication.get("bibtex", ""))
     if venue:
         publication["venue"] = venue
     if venue_short:
         publication["venueShort"] = venue_short
-    if not publication.get("venue"):
+    is_arxiv_or_corr_entry = (
+        is_arxiv_like_url(publication.get("paperUrl", ""))
+        or is_arxiv_like_url(publication.get("arxivUrl", ""))
+        or str(publication.get("venueShort", "")).strip().lower() == "corr"
+    )
+    if not publication.get("venue") and not is_arxiv_or_corr_entry:
         issue_url = publication.get("dblpIssueUrl", "")
         issue_venue = extract_venue_from_dblp_issue_url(issue_url)
         if issue_venue:
@@ -560,22 +792,23 @@ def enrich_publication(publication, include_arxiv=False, start_date=""):
         bibtex_url = extract_url_from_bibtex(publication.get("bibtex", ""))
         if bibtex_url:
             publication["paperUrl"] = bibtex_url
-            if "arxiv" in bibtex_url.lower() and not publication.get("arxivUrl"):
+            if is_arxiv_like_url(bibtex_url) and not publication.get("arxivUrl"):
                 publication["arxivUrl"] = bibtex_url
             paper_url = bibtex_url
 
-    if paper_url and "arxiv" in paper_url.lower() and not publication.get("arxivUrl"):
+    if paper_url and is_arxiv_like_url(paper_url) and not publication.get("arxivUrl"):
         publication["arxivUrl"] = paper_url
 
-    if not include_arxiv and paper_url and "arxiv" in paper_url.lower():
+    if not include_arxiv and paper_url and is_arxiv_like_url(paper_url):
         publication["skip"] = True
         publication.pop("bibtexViewUrl", None)
+        publication.pop("dblpIssueUrl", None)
         return publication
 
     year_text = extract_year_from_bibtex(publication.get("bibtex", ""))
     if year_text:
         publication["date"] = year_text
-    if start_date and publication.get("date") and not is_on_or_after_start_date(publication.get("date", ""), start_date):
+    if start_date and publication.get("date") and not is_on_or_after_start_year(publication.get("date", ""), start_date):
         publication["skip"] = True
         publication.pop("bibtexViewUrl", None)
         publication.pop("dblpIssueUrl", None)
@@ -585,14 +818,14 @@ def enrich_publication(publication, include_arxiv=False, start_date=""):
         metadata = fetch_metadata_from_paper_url(paper_url)
         publication["abstract"] = metadata.get("abstract", "")
         publication["date"] = metadata.get("date", "")
-        publication["tags"] = metadata.get("tags", [])
+        publication["tags"] = []
 
     if not publication.get("date"):
         year_text = extract_year_from_bibtex(publication.get("bibtex", ""))
         if year_text:
             publication["date"] = year_text
 
-    if start_date and not is_on_or_after_start_date(publication.get("date", ""), start_date):
+    if start_date and not is_on_or_after_start_year(publication.get("date", ""), start_date):
         publication["skip"] = True
 
     publication.pop("bibtexViewUrl", None)
@@ -671,7 +904,7 @@ def scrape_dblp_publications(url, include_arxiv=False, start_date=""):
         if publication.get("paperUrl") and "arxiv" in publication["paperUrl"].lower() and not publication.get("arxivUrl"):
             publication["arxivUrl"] = publication["paperUrl"]
 
-        if start_date and publication.get("date") and not is_on_or_after_start_date(publication.get("date", ""), start_date):
+        if start_date and publication.get("date") and not is_on_or_after_start_year(publication.get("date", ""), start_date):
             continue
 
         publications.append(publication)
@@ -697,8 +930,11 @@ def scrape_dblp_publications(url, include_arxiv=False, start_date=""):
             publication.pop("bibtexViewUrl", None)
             publication.pop("dblpIssueUrl", None)
 
+        if publication.get("skip"):
+            continue
+
         title = publication.get("title", "")
-        keys_to_check = ["date", "authors", "venue", "venueShort", "tags", "awards", "abstract", "arxivUrl", "paperUrl", "bibtex"]
+        keys_to_check = ["date", "authors", "venue", "venueShort", "abstract", "arxivUrl", "paperUrl", "bibtex"]
         success_keys = []
         empty_keys = []
         for key in keys_to_check:
@@ -788,10 +1024,8 @@ def prefer_scalar(existing_value, incoming_value):
 
 def merge_publication_items(existing_item, incoming_item):
     existing_item["authors"] = merge_unique_list(existing_item.get("authors", []), incoming_item.get("authors", []))
-    existing_item["tags"] = merge_unique_list(existing_item.get("tags", []), incoming_item.get("tags", []))
-    existing_item["awards"] = merge_unique_list(existing_item.get("awards", []), incoming_item.get("awards", []))
 
-    for key in ["title", "date", "venue", "venueShort", "abstract", "bibtex", "paperUrl", "arxivUrl", "projectUrl", "slidesUrl"]:
+    for key in ["title", "date", "venue", "venueShort", "abstract", "bibtex", "paperUrl", "arxivUrl"]:
         existing_item[key] = prefer_scalar(existing_item.get(key, ""), incoming_item.get(key, ""))
 
     paper_url = existing_item.get("paperUrl", "")
@@ -849,53 +1083,6 @@ def publication_dedup_key(publication):
     return f"raw:{raw}"
 
 
-def merge_into_merged_collection(merged_filepath, new_publications):
-    existing_publications = load_js_array(merged_filepath)
-
-    merged_by_key = {}
-    ordered_keys = []
-    for item in existing_publications:
-        key = publication_dedup_key(item)
-        if key not in merged_by_key:
-            merged_by_key[key] = item
-            ordered_keys.append(key)
-        else:
-            merge_publication_items(merged_by_key[key], item)
-
-    deduped_titles = []
-    added_titles = []
-    for item in new_publications:
-        key = publication_dedup_key(item)
-        title = (item.get("title", "") or "").strip() or "(无标题)"
-        if key in merged_by_key:
-            merge_publication_items(merged_by_key[key], item)
-            deduped_titles.append(title)
-        else:
-            merged_by_key[key] = item
-            ordered_keys.append(key)
-            added_titles.append(title)
-
-    merged_data = [merged_by_key[key] for key in ordered_keys]
-    save_to_js(merged_data, merged_filepath)
-
-    print(f"并入 merged_collection.js 完成：新增 {len(added_titles)} 条，去重 {len(deduped_titles)} 条。")
-    print("以下条目已去重（已存在于 merged_collection.js）:")
-    if deduped_titles:
-        for title in deduped_titles:
-            print(f"  - {title}")
-    else:
-        print("  - 无")
-
-    print("以下条目为新增并入（未命中去重）:")
-    if added_titles:
-        for title in added_titles:
-            print(f"  - {title}")
-    else:
-        print("  - 无")
-
-    return merged_data
-
-
 def merge_into_existing_js_file(existing_js_filepath, new_publications):
     existing_publications = load_js_array(existing_js_filepath)
 
@@ -923,72 +1110,14 @@ def merge_into_existing_js_file(existing_js_filepath, new_publications):
             added_titles.append(title)
 
     merged_data = [merged_by_key[key] for key in ordered_keys]
+    for item in merged_data:
+        item.pop("tags", None)
+        item.pop("awards", None)
     save_to_js(merged_data, existing_js_filepath)
 
     print(f"Merged into existing JS file: added {len(added_titles)}, deduplicated {len(deduped_titles)}.")
     return merged_data
 
-
-def sanitize_js_filename(filename, fallback_name="scraped_publications"):
-    raw = (filename or "").strip()
-    if not raw:
-        raw = fallback_name
-    raw = re.sub(r"[^A-Za-z0-9._-]+", "_", raw)
-    if not raw.lower().endswith(".js"):
-        raw += ".js"
-    return raw
-
-
-def pick_path_from_file_manager(mode):
-    if mode == "existing":
-        script = 'POSIX path of (choose file with prompt "Select an existing .js file")'
-    elif mode == "folder":
-        script = 'POSIX path of (choose folder with prompt "Select a destination folder for new .js file")'
-    else:
-        raise ValueError("Unsupported picker mode")
-
-    result = subprocess.run(
-        ["osascript", "-e", script],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        stderr_text = (result.stderr or "").strip() or "Picker cancelled or failed"
-        raise Exception(stderr_text)
-
-    selected_path = (result.stdout or "").strip()
-    if not selected_path:
-        raise Exception("No path selected")
-    return selected_path
-
-
-def build_commit_message(author_name, publications):
-    titles = [pub.get("title", "").strip() for pub in publications if pub.get("title", "").strip()]
-    if not titles:
-        return f"增加了{author_name}的publication"
-    preview_count = min(5, len(titles))
-    numbered_titles = [f"{index + 1}. {titles[index]}" for index in range(preview_count)]
-    suffix = "；..." if len(titles) > preview_count else ""
-    return f"增加了{author_name}的publication: {'；'.join(numbered_titles)}{suffix}"
-
-
-def run_git_auto_flow(repo_root, filepaths, commit_message):
-    relpaths = []
-    for filepath in filepaths:
-        if not filepath:
-            continue
-        relpaths.append(os.path.relpath(filepath, repo_root))
-    if not relpaths:
-        return
-
-    subprocess.run(["git", "add", *relpaths], cwd=repo_root, check=True)
-    diff_result = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=repo_root)
-    if diff_result.returncode == 0:
-        print("没有检测到变更，已跳过 git commit / git push --force")
-        return
-    subprocess.run(["git", "commit", "-m", commit_message], cwd=repo_root, check=True)
-    subprocess.run(["git", "push", "--force"], cwd=repo_root, check=True)
 
 def format_publications(publications, include_arxiv=False, start_date=""):
     """
@@ -1018,7 +1147,7 @@ def format_publications(publications, include_arxiv=False, start_date=""):
             continue
         if not include_arxiv and pub.get("arxivUrl", ""):
             continue
-        if not is_on_or_after_start_date(pub.get("date", ""), start_date):
+        if not is_on_or_after_start_year(pub.get("date", ""), start_date):
             continue
         item = {
             "title": pub.get("title", ""),
@@ -1026,8 +1155,6 @@ def format_publications(publications, include_arxiv=False, start_date=""):
             "authors": pub.get("authors", []),
             "venue": normalized_venue,
             "venueShort": normalized_venue_short,
-            "tags": pub.get("tags", []),
-            "awards": pub.get("awards", []),
             "abstract": pub.get("abstract", ""),
             "arxivUrl": pub.get("arxivUrl", ""),
             "paperUrl": pub.get("paperUrl", ""),
@@ -1050,10 +1177,7 @@ def run_scrape_flow(
     url,
     include_arxiv_input,
     start_date_input,
-    storage_mode="",
     existing_js_path="",
-    new_js_dir="",
-    new_js_filename="",
 ):
     url = (url or "").strip() or DEFAULT_DBLP_URL
     if not re.match(r"^https://dblp\.org/pid/[^/]+/[^/]+\.html$", url):
@@ -1063,31 +1187,18 @@ def run_scrape_flow(
 
     include_arxiv = parse_include_arxiv_input(include_arxiv_input)
 
-    storage_mode = (storage_mode or "").strip().lower()
-    if not storage_mode:
-        print("错误：请先选择储存方式，再开始抓取。")
-        return 1
-    if storage_mode not in {"existing", "new"}:
-        print("错误：储存方式无效，请重新选择。")
-        return 1
-
     start_date_input = (start_date_input or "").strip()
     start_date = ""
     if start_date_input:
-        start_date = normalize_date(start_date_input)
+        start_date = parse_start_year(start_date_input)
         if not start_date:
-            print("错误：起始时间格式无效，请输入 YYYY 或 YYYY-MM-DD")
+            print("错误：起始年份格式无效，请输入 YYYY")
             return 1
 
     author_name = extract_author_name_from_dblp(url)
     if not author_name:
         print("错误：无法从该网址提取作者姓名")
         return 1
-    safe_name = re.sub(r"[^A-Za-z0-9]+", "_", author_name.strip()).strip("_")
-    if not safe_name:
-        print("错误：作者姓名无法用于生成文件名")
-        return 1
-
     try:
         publications, bibtex_view_urls = scrape_dblp_publications(
             url,
@@ -1106,528 +1217,76 @@ def run_scrape_flow(
             include_arxiv=include_arxiv,
             start_date=start_date,
         )
+
         print(f"筛选后保留 {len(formatted_publications)} 条 publication。")
 
-        if storage_mode == "existing":
-            js_filepath = (existing_js_path or "").strip()
-            if not js_filepath:
-                print("Error: Existing JS mode selected but no file path provided.")
-                return 1
-            if not os.path.exists(js_filepath):
-                print(f"Error: Selected JS file does not exist: {js_filepath}")
-                return 1
-            merge_into_existing_js_file(js_filepath, formatted_publications)
-            print(f"Publications saved to existing file: {js_filepath}")
-            print("Skipped merged_collection update and git auto flow for custom target mode.")
-            return 0
-
-        if storage_mode == "new":
-            target_dir = (new_js_dir or "").strip()
-            if not target_dir:
-                print("Error: New JS mode selected but no target folder provided.")
-                return 1
-            os.makedirs(target_dir, exist_ok=True)
-            default_name = f"{safe_name}.js" if safe_name else "scraped_publications.js"
-            js_filename = sanitize_js_filename(new_js_filename, fallback_name=default_name.replace(".js", ""))
-            js_filepath = os.path.join(target_dir, js_filename)
-            save_to_js(formatted_publications, js_filepath)
-            print(f"Publications saved to new file: {js_filepath}")
-            print("Skipped merged_collection update and git auto flow for custom target mode.")
-            return 0
-
-        return 1
+        js_filepath = (existing_js_path or "").strip()
+        if not js_filepath:
+            print("Error: existing_js_path is required.")
+            return 1
+        if not os.path.exists(js_filepath):
+            print(f"Error: Selected JS file does not exist: {js_filepath}")
+            return 1
+        merge_into_existing_js_file(js_filepath, formatted_publications)
+        print(f"Publications saved to existing file: {js_filepath}")
+        print("Skipped merged_collection update and git auto flow for custom target mode.")
+        return 0
 
     except Exception as e:
         print(f"An error occurred: {e}")
         return 1
 
 
-def _render_gui_page_legacy(default_url=DEFAULT_DBLP_URL, default_start_date=""):
-        return f"""<!doctype html>
-<html lang=\"zh-CN\">
-<head>
-    <meta charset=\"utf-8\" />
-    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-    <title>Publication Scraper GUI</title>
-    <style>
-        body {{ font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; max-width: 980px; margin: 24px auto; padding: 0 16px; }}
-        .card {{ border: 1px solid #ddd; border-radius: 10px; padding: 16px; margin-bottom: 16px; }}
-        label {{ display: block; margin: 10px 0 6px; font-weight: 600; }}
-        input[type=text], select {{ width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 8px; }}
-        button {{ padding: 10px 14px; border: 0; border-radius: 8px; background: #111; color: #fff; cursor: pointer; }}
-        pre {{ background: #0b1020; color: #d6e4ff; padding: 14px; border-radius: 10px; overflow: auto; white-space: pre-wrap; word-break: break-word; }}
-        .hint {{ color: #666; font-size: 13px; }}
-    </style>
-</head>
-<body>
-    <h2>DBLP Publication Scraper GUI</h2>
-    <div class=\"card\">
-        <form method=\"post\" action=\"/run\">
-            <label>DBLP 作者 URL</label>
-            <input type=\"text\" name=\"url\" value=\"{default_url}\" required />
-    <title>DBLP Publication Scraper</title>
-            <label>起始日期（YYYY 或 YYYY-MM-DD，可空）</label>
-            <input type=\"text\" name=\"start_date\" value=\"{default_start_date}\" />
-
-            <label>抓取终点（publication list 按时间倒序，可选）</label>
-        input[type=text] {{ width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 8px; }}
-                <button type=\"button\" onclick=\"loadPublicationList()\">加载 publication list</button>
-                <span class=\"hint\" id=\"list_status\">未加载</span>
-            </div>
-            <select id=\"end_marker_select\" disabled>
-                <option value=\"\">抓取全部（不设终点）</option>
-            </select>
-    <h2>DBLP Publication Scraper</h2>
-
-            <label><input type=\"checkbox\" name=\"include_arxiv\" value=\"y\" /> 包含 arXiv 论文</label>
-            <label>DBLP Author URL</label>
-            <button type=\"submit\">开始抓取并并入 merged_collection</button>
-            <p class=\"hint\">日志中会显示：哪些条目被去重、哪些条目新增。</p>
-            <label>Start date (YYYY or YYYY-MM-DD, optional)</label>
-    </div>
-
-            <label><input type="checkbox" name="include_arxiv" value="y" /> Include arXiv papers</label>
-    statusEl.textContent = '加载中...';
-            <button type="submit">Start scraping and merge into merged_collection</button>
-            <p class="hint">Logs will show which entries were deduplicated and which were newly added.</p>
-
-    try {{
-        const resp = await fetch(`/publication_list?url=${{encodeURIComponent(url)}}`, {{ cache: 'no-store' }});
-        if (!resp.ok) throw new Error('加载失败');
-        const data = await resp.json();
-        const list = data.publications || [];
-
-        for (const item of list) {{
-            const opt = document.createElement('option');
-            const dateText = item.date || '未知日期';
-            opt.value = item.marker;
-            opt.textContent = `[${{dateText}}] ${{item.title}}`;
-            selectEl.appendChild(opt);
-        }}
-
-        selectEl.disabled = false;
-        statusEl.textContent = `已加载 ${{list.length}} 条`;
-    }} catch (e) {{
-        statusEl.textContent = '加载失败，请检查 URL';
-    }}
-}}
-
-document.addEventListener('DOMContentLoaded', () => {{
-    const form = document.querySelector('form[action="/run"]');
-    const selectEl = document.getElementById('end_marker_select');
-    const hiddenEl = document.getElementById('end_marker');
-
-    form.addEventListener('submit', () => {{
-        hiddenEl.value = selectEl.value || '';
-    }});
-}});
-</script>
-</body>
-</html>
-"""
+def _to_yes_no_text(value):
+    if isinstance(value, bool):
+        return "y" if value else "n"
+    text = str(value or "").strip()
+    if not text:
+        return "n"
+    return text
 
 
-def render_gui_page(default_url=DEFAULT_DBLP_URL, default_start_date=""):
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>DBLP Publication Scraper</title>
-    <style>
-        body {{ font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; max-width: 980px; margin: 24px auto; padding: 0 16px; }}
-        .card {{ border: 1px solid #ddd; border-radius: 10px; padding: 16px; margin-bottom: 16px; }}
-        label {{ display: block; margin: 10px 0 6px; font-weight: 600; }}
-        input[type=text] {{ width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 8px; }}
-        button {{ padding: 10px 14px; border: 0; border-radius: 8px; background: #111; color: #fff; cursor: pointer; }}
-        .hint {{ color: #666; font-size: 13px; }}
-        .row {{ display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }}
-        .hidden {{ display: none; }}
-    </style>
-</head>
-<body>
-    <h2>DBLP Publication Scraper</h2>
-    <div class="card">
-        <form method="post" action="/run">
-            <label>DBLP Author URL</label>
-            <input type="text" name="url" value="{default_url}" required />
+def load_run_config(config_path):
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Config file not found: {config_path}")
 
-            <label>Start date (YYYY or YYYY-MM-DD, optional)</label>
-            <input type="text" name="start_date" value="{default_start_date}" />
+    with open(config_path, "r", encoding="utf-8") as config_file:
+        config_data = json.load(config_file)
+    if not isinstance(config_data, dict):
+        raise ValueError(f"Config root must be an object: {config_path}")
 
-            <label><input type="checkbox" name="include_arxiv" value="y" /> Include arXiv papers</label>
-
-            <label>Save destination</label>
-            <div class="row">
-                <label><input type="radio" name="storage_mode" value="existing" onchange="toggleStorageMode()" /> Existing .js file</label>
-                <label><input type="radio" name="storage_mode" value="new" onchange="toggleStorageMode()" /> Create new .js file</label>
-            </div>
-
-            <div id="existing_mode_block">
-                <div class="row">
-                    <button type="button" onclick="pickExistingJs()">Choose .js file</button>
-                    <span id="existing_status" class="hint">No file selected</span>
-                </div>
-                <input type="text" id="existing_js_path" name="existing_js_path" placeholder="Selected existing .js file path" />
-            </div>
-
-            <div id="new_mode_block" class="hidden">
-                <div class="row">
-                    <button type="button" onclick="pickNewFolder()">Choose folder</button>
-                    <span id="new_status" class="hint">No folder selected</span>
-                </div>
-                <input type="text" id="new_js_dir" name="new_js_dir" placeholder="Selected folder path" />
-                <label>New filename (optional, default is author name)</label>
-                <input type="text" id="new_js_filename" name="new_js_filename" placeholder="e.g. my_publications.js" />
-            </div>
-
-            <button type="submit">Start scraping</button>
-            <p class="hint">Please select one save destination mode before starting.</p>
-        </form>
-    </div>
-<script>
-function toggleStorageMode() {{
-    const selected = document.querySelector('input[name="storage_mode"]:checked');
-    const mode = selected ? selected.value : '';
-    document.getElementById('existing_mode_block').classList.toggle('hidden', mode !== 'existing');
-    document.getElementById('new_mode_block').classList.toggle('hidden', mode !== 'new');
-}}
-
-async function pickExistingJs() {{
-    const statusEl = document.getElementById('existing_status');
-    statusEl.textContent = 'Opening file picker...';
-    try {{
-        const resp = await fetch('/pick_existing_js', {{ cache: 'no-store' }});
-        const data = await resp.json();
-        if (!resp.ok || !data.path) throw new Error(data.error || 'Failed to pick file');
-        document.getElementById('existing_js_path').value = data.path;
-        statusEl.textContent = 'Selected';
-    }} catch (e) {{
-        statusEl.textContent = 'Selection cancelled or failed';
-    }}
-}}
-
-async function pickNewFolder() {{
-    const statusEl = document.getElementById('new_status');
-    statusEl.textContent = 'Opening folder picker...';
-    try {{
-        const resp = await fetch('/pick_new_js_folder', {{ cache: 'no-store' }});
-        const data = await resp.json();
-        if (!resp.ok || !data.path) throw new Error(data.error || 'Failed to pick folder');
-        document.getElementById('new_js_dir').value = data.path;
-        statusEl.textContent = 'Selected';
-    }} catch (e) {{
-        statusEl.textContent = 'Selection cancelled or failed';
-    }}
-}}
-
-document.addEventListener('DOMContentLoaded', () => {{
-    toggleStorageMode();
-    const form = document.querySelector('form[action="/run"]');
-    form.addEventListener('submit', (event) => {{
-        const selected = document.querySelector('input[name="storage_mode"]:checked');
-        if (!selected) {{
-            event.preventDefault();
-            alert('Please choose a save destination before starting.');
-        }}
-    }});
-}});
-</script>
-</body>
-</html>
-"""
-
-
-def render_job_page(job_id):
-        return f"""<!doctype html>
-<html lang=\"en\">
-<head>
-    <meta charset=\"utf-8\" />
-    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-    <title>Task Progress</title>
-    <style>
-        body {{ font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; max-width: 980px; margin: 24px auto; padding: 0 16px; }}
-        .card {{ border: 1px solid #ddd; border-radius: 10px; padding: 16px; margin-bottom: 16px; }}
-        .status {{ font-weight: 600; margin-bottom: 8px; }}
-        pre {{ background: #0b1020; color: #d6e4ff; padding: 14px; border-radius: 10px; overflow: auto; white-space: pre-wrap; word-break: break-word; min-height: 320px; }}
-        .ok {{ color: #0a7f2e; }}
-        .err {{ color: #b00020; }}
-    </style>
-</head>
-<body>
-    <h2>Real-time Task Progress</h2>
-    <div class=\"card\">
-        <div id="status" class="status">Task started. Scraping in progress...</div>
-        <p><a href="/">← Back to Home</a></p>
-        <pre id=\"logs\"></pre>
-    </div>
-
-<script>
-(() => {{
-    const jobId = {json.dumps(job_id)};
-    const logsEl = document.getElementById('logs');
-    const statusEl = document.getElementById('status');
-    let offset = 0;
-    let done = false;
-
-    async function poll() {{
-        if (done) return;
-        try {{
-            const resp = await fetch(`/job_logs?id=${{encodeURIComponent(jobId)}}&offset=${{offset}}`, {{ cache: 'no-store' }});
-            if (!resp.ok) {{
-                statusEl.textContent = 'Failed to load logs. Please refresh and try again.';
-                statusEl.className = 'status err';
-                done = true;
-                return;
-            }}
-            const data = await resp.json();
-            if (data.chunk) {{
-                logsEl.textContent += data.chunk;
-                logsEl.scrollTop = logsEl.scrollHeight;
-            }}
-            offset = data.next_offset;
-            if (data.done) {{
-                done = true;
-                if (data.exit_code === 0) {{
-                    statusEl.textContent = `Completed (exit code: ${{data.exit_code}})`;
-                    statusEl.className = 'status ok';
-                }} else {{
-                    statusEl.textContent = `Failed (exit code: ${{data.exit_code}})`;
-                    statusEl.className = 'status err';
-                }}
-                return;
-            }}
-            setTimeout(poll, 1000);
-        }} catch (e) {{
-            statusEl.textContent = 'Network issue. Retrying...';
-            statusEl.className = 'status err';
-            setTimeout(poll, 1500);
-        }}
-    }}
-
-    poll();
-}})();
-</script>
-</body>
-</html>
-"""
-
-
-def launch_browser_gui(host="127.0.0.1", port=8765):
-    jobs = {}
-    jobs_lock = threading.Lock()
-
-    class JobLogWriter:
-        def __init__(self, job):
-            self.job = job
-
-        def write(self, text):
-            if not text:
-                return 0
-            with jobs_lock:
-                self.job["logs"] += text
-            return len(text)
-
-        def flush(self):
-            return
-
-    def run_job(job):
-        writer = JobLogWriter(job)
-        try:
-            with redirect_stdout(writer), redirect_stderr(writer):
-                job["exit_code"] = run_scrape_flow(
-                    job["url"],
-                    job["include_arxiv_input"],
-                    job["start_date"],
-                    storage_mode=job.get("storage_mode", "default"),
-                    existing_js_path=job.get("existing_js_path", ""),
-                    new_js_dir=job.get("new_js_dir", ""),
-                    new_js_filename=job.get("new_js_filename", ""),
-                )
-        except Exception as exc:
-            with jobs_lock:
-                job["logs"] += f"\nGUI task error: {exc}\n"
-                job["exit_code"] = 1
-        finally:
-            with jobs_lock:
-                job["done"] = True
-
-    class Handler(BaseHTTPRequestHandler):
-        def _write_html(self, content, status=200):
-            data = content.encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-
-        def _write_json(self, payload, status=200):
-            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-
-        def _redirect(self, location):
-            self.send_response(303)
-            self.send_header("Location", location)
-            self.end_headers()
-
-        def do_GET(self):
-            parsed = urlparse(self.path)
-            if parsed.path in ["/", "/index.html"]:
-                self._write_html(render_gui_page())
-                return
-            if parsed.path == "/pick_existing_js":
-                try:
-                    selected_path = pick_path_from_file_manager("existing")
-                    self._write_json({"path": selected_path})
-                except Exception as exc:
-                    self._write_json({"error": str(exc)}, status=400)
-                return
-            if parsed.path == "/pick_new_js_folder":
-                try:
-                    selected_path = pick_path_from_file_manager("folder")
-                    self._write_json({"path": selected_path})
-                except Exception as exc:
-                    self._write_json({"error": str(exc)}, status=400)
-                return
-            if parsed.path == "/job":
-                query = parse_qs(parsed.query)
-                job_id = (query.get("id", [""])[0] or "").strip()
-                with jobs_lock:
-                    exists = job_id in jobs
-                if not exists:
-                    self._write_html("<h3>Task does not exist or has expired</h3>", status=404)
-                    return
-                self._write_html(render_job_page(job_id))
-                return
-            if parsed.path == "/job_logs":
-                query = parse_qs(parsed.query)
-                job_id = (query.get("id", [""])[0] or "").strip()
-                offset_raw = (query.get("offset", ["0"])[0] or "0").strip()
-                try:
-                    offset = max(0, int(offset_raw))
-                except ValueError:
-                    offset = 0
-
-                with jobs_lock:
-                    job = jobs.get(job_id)
-                    if not job:
-                        self._write_json({"error": "job not found"}, status=404)
-                        return
-                    logs = job["logs"]
-                    next_offset = len(logs)
-                    chunk = logs[offset:next_offset] if offset <= next_offset else ""
-                    done = bool(job.get("done"))
-                    exit_code = job.get("exit_code")
-
-                self._write_json({
-                    "chunk": chunk,
-                    "next_offset": next_offset,
-                    "done": done,
-                    "exit_code": exit_code,
-                })
-                return
-            self._write_html("<h3>404 Not Found</h3>", status=404)
-
-        def do_POST(self):
-            if self.path != "/run":
-                self._write_html("<h3>404 Not Found</h3>", status=404)
-                return
-
-            content_length = int(self.headers.get("Content-Length", "0"))
-            raw_body = self.rfile.read(content_length).decode("utf-8")
-            fields = parse_qs(raw_body, keep_blank_values=True)
-
-            url = fields.get("url", [""])[0]
-            start_date = fields.get("start_date", [""])[0]
-            include_arxiv_input = "y" if "include_arxiv" in fields else "n"
-            storage_mode = (fields.get("storage_mode", [""])[0] or "").strip().lower()
-            existing_js_path = fields.get("existing_js_path", [""])[0]
-            new_js_dir = fields.get("new_js_dir", [""])[0]
-            new_js_filename = fields.get("new_js_filename", [""])[0]
-
-            if not storage_mode:
-                self._write_html("<h3>Please choose a save destination before starting.</h3><p><a href='/'>← Back to Home</a></p>", status=400)
-                return
-
-            job_id = uuid.uuid4().hex
-            job = {
-                "id": job_id,
-                "url": url,
-                "start_date": start_date,
-                "include_arxiv_input": include_arxiv_input,
-                "storage_mode": storage_mode,
-                "existing_js_path": existing_js_path,
-                "new_js_dir": new_js_dir,
-                "new_js_filename": new_js_filename,
-                "logs": "",
-                "done": False,
-                "exit_code": None,
-                "created_at": time.time(),
-            }
-            with jobs_lock:
-                jobs[job_id] = job
-                stale_ids = [
-                    item_id for item_id, item in jobs.items()
-                    if item.get("done") and (time.time() - item.get("created_at", time.time()) > 3600)
-                ]
-                for item_id in stale_ids:
-                    jobs.pop(item_id, None)
-
-            worker = threading.Thread(target=run_job, args=(job,), daemon=True)
-            worker.start()
-            self._redirect(f"/job?id={job_id}")
-
-        def log_message(self, format_str, *args):
-            return
-
-    server = ThreadingHTTPServer((host, port), Handler)
-    url = f"http://{host}:{port}"
-    print(f"GUI started: {url}")
-    print("Press Ctrl+C to stop the server")
-    webbrowser.open(url)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
+    return {
+        "url": str(config_data.get("url", DEFAULT_DBLP_URL) or DEFAULT_DBLP_URL).strip(),
+        "include_arxiv_input": _to_yes_no_text(config_data.get("include_arxiv", "n")),
+        "start_date_input": str(config_data.get("start_date", "") or "").strip(),
+        "existing_js_path": str(config_data.get("existing_js_path", "") or "").strip(),
+    }
 
 
 def main():
     parser = argparse.ArgumentParser(description="Scrape DBLP publications")
-    parser.add_argument("--gui", action="store_true", help="Start built-in browser GUI")
+    parser.add_argument("--config", default=DEFAULT_CONFIG_FILENAME, help="Path to run config JSON")
     args = parser.parse_args()
 
-    if args.gui:
-        launch_browser_gui()
-        return
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    config_path = args.config
+    if not os.path.isabs(config_path):
+        config_path = os.path.join(project_root, config_path)
 
-    url = input(f"请输入DBLP作者网址 (默认 {DEFAULT_DBLP_URL}): ").strip() or DEFAULT_DBLP_URL
-    include_arxiv_input = input("是否包含 arXiv 论文？(y/N，支持输入“要/不要”): ")
-    start_date_input = input("从哪一个时间之后开始（可留空，支持 YYYY 或 YYYY-MM-DD）: ").strip()
-    storage_mode = input("请选择储存方式（existing/new）: ").strip().lower()
-    existing_js_path = ""
-    new_js_dir = ""
-    new_js_filename = ""
-    if storage_mode == "existing":
-        existing_js_path = input("请输入已有 .js 文件路径: ").strip()
-    elif storage_mode == "new":
-        new_js_dir = input("请输入新建 .js 的目录路径: ").strip()
-        new_js_filename = input("请输入新文件名（可留空，默认作者名）: ").strip()
+    try:
+        run_config = load_run_config(config_path)
+    except Exception as exc:
+        print(f"Error loading config: {exc}")
+        print("Please create or fix config file, e.g. config.json")
+        sys.exit(1)
+
+    print(f"Using config file: {config_path}")
 
     exit_code = run_scrape_flow(
-        url,
-        include_arxiv_input,
-        start_date_input,
-        storage_mode=storage_mode,
-        existing_js_path=existing_js_path,
-        new_js_dir=new_js_dir,
-        new_js_filename=new_js_filename,
+        run_config["url"],
+        run_config["include_arxiv_input"],
+        run_config["start_date_input"],
+        existing_js_path=run_config["existing_js_path"],
     )
     if exit_code != 0:
         sys.exit(exit_code)

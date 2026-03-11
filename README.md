@@ -1,21 +1,20 @@
 # dblp scraper
 
-`dblp scraper` is a tool for scraping publications from DBLP author pages, with both GUI and CLI workflows.
+`dblp scraper` is a tool for scraping publications from DBLP author pages.
 
 ## Features
 
 - Scrape publication data from DBLP author pages.
 - Optional inclusion of arXiv papers.
-- Filter by start date (`YYYY` or `YYYY-MM-DD`).
-- Two save modes:
-  - Merge into an existing `.js` file
-  - Create a new `.js` file
-- Real-time logs in GUI mode.
+- Filter by start year (`YYYY`).
+- Save mode: merge into an existing `.js` file.
+- Config-driven execution.
 
 ## Project Structure
 
-- `scrape_publications.py`: main program (scraping, formatting, GUI server, save logic)
+- `scrape_publications.py`: main program
 - `sp`: shortcut launcher script
+- `config.json`: runtime config used by `./sp`
 - `requirements.txt`: Python dependencies
 
 ## Requirements
@@ -26,79 +25,45 @@
 
 ## Quick Start
 
-Run in the project root:
+Install dependencies:
 
 ```bash
 ./sp i
 ```
 
-Notes:
-- `./sp i` automatically creates and uses the local `.venv` to install dependencies (avoids system Python package restrictions).
-
-After installation, start the GUI:
+Edit `config.json`, then run:
 
 ```bash
-./sp g
+./sp
 ```
 
-Start the CLI:
+## Config File
 
-```bash
-./sp c
+`config.json` fields:
+
+- `url`: DBLP author URL
+- `include_arxiv`: `y`/`n` (or `true`/`false`)
+- `start_date`: empty or `YYYY`
+- `existing_js_path`: required
+
+Example:
+
+```json
+{
+  "url": "https://dblp.org/pid/257/0002.html",
+  "include_arxiv": "N",
+  "start_date": "2025",
+  "existing_js_path": "/Users/guoyiheng/dblp-publications-scraper/my.js"
+}
 ```
-
-## GUI Workflow
-
-1. Run `./sp g` to open the page.
-2. Enter a DBLP author URL.
-3. Optional: set a start date (`YYYY` or `YYYY-MM-DD`).
-4. Optional: enable arXiv inclusion.
-5. **You must choose a Save destination before starting**, otherwise scraping will be blocked.
-6. Fill fields based on selected save mode:
-   - Existing: choose an existing `.js` file
-   - New: choose a folder, optionally set a filename
-7. Start scraping and monitor progress in the live log page.
-
-## Save Modes
-
-### 1) Existing .js file
-
-- Merges results into your selected existing `.js` file.
-- Does not update `merged_collection.js`.
-- Does not trigger automatic git flow.
-
-### 2) Create new .js file
-
-- Creates a new `.js` file in your selected folder.
-- Filename is optional; defaults to the author name if empty.
-- Does not update `merged_collection.js`.
-- Does not trigger automatic git flow.
-
-## CLI Usage
-
-Run:
-
-```bash
-./sp c
-```
-
-CLI prompts for:
-- DBLP URL
-- Include arXiv or not
-- Start date
-- Save mode (`existing` or `new`)
-- Corresponding file/folder path inputs
 
 ## Command Reference
 
-- `./sp g`: start GUI
-- `./sp c`: start CLI
-- `./sp x`: stop GUI (and try to free port 8765)
+- `./sp` or `./sp run`: run scraping using `config.json`
 - `./sp i`: install dependencies
 - `./sp --help`: show help
 
-Long-form equivalents:
-- `./sp gui` / `./sp cli` / `./sp stop` / `./sp install`
+
 
 ## Troubleshooting
 
@@ -112,7 +77,7 @@ Run:
 
 ### 2) `sp: command not found`
 
-Use commands with `./` from the project root, such as `./sp g` and `./sp i`.
+Use commands with `./` from the project root, such as `./sp` and `./sp i`.
 
 ### 3) `bash: ./sp: Permission denied`
 
@@ -122,24 +87,10 @@ Use commands with `./` from the project root, such as `./sp g` and `./sp i`.
 chmod +x ./sp
 ```
 
-Then run your command again, for example:
+Then run your command again:
 
 ```bash
-./sp i
-```
-
-### 4) `OSError: [Errno 48] Address already in use`
-
-The GUI port is occupied. Run:
-
-```bash
-./sp x
-```
-
-Then start again:
-
-```bash
-./sp g
+./sp
 ```
 
 

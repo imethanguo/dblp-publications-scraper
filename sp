@@ -36,14 +36,11 @@ pick_python() {
 show_help() {
   cat <<'EOF'
 Usage:
-  ./sp g        # start GUI (short)
-  ./sp c        # start CLI (short)
-  ./sp x        # stop GUI (short)
+  ./sp          # run with config.json
+  ./sp r        # run with config.json (short)
   ./sp i        # install required python packages (short)
 
-  ./sp gui      # start GUI
-  ./sp cli      # start CLI
-  ./sp stop     # stop GUI
+  ./sp run      # run with config.json
   ./sp install  # install required python packages
   ./sp --help   # show script help
 
@@ -73,24 +70,10 @@ ensure_runtime_deps() {
 
 CMD="${1:-}"
 case "$CMD" in
-  g|gui)
-    shift || true
-    ensure_runtime_deps
-    exec "$(pick_python)" "$SCRIPT" --gui "$@"
-    ;;
-  c|cli)
+  ""|r|run)
     shift || true
     ensure_runtime_deps
     exec "$(pick_python)" "$SCRIPT" "$@"
-    ;;
-  x|stop)
-    pkill -f "scrape_publications.py --gui" || true
-    PID="$(lsof -ti tcp:8765 || true)"
-    if [[ -n "$PID" ]]; then
-      kill -9 $PID || true
-    fi
-    echo "GUI stopped (if running)."
-    exit 0
     ;;
   i|install|deps)
     shift || true
