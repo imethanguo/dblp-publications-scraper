@@ -6,10 +6,10 @@
   "include_arxiv": "true",
 
   "_comment_3": "Start year filter: leave empty, or use YYYY",
-  "start_date": "2024",
+  "start_date": "",
 
   "_comment_4": "Absolute path to an existing .js file (must exist)",
-  "existing_js_path": "/Users/guoyiheng/selected-publications/collection/new.js",
+  "existing_js_path": "/Users/guoyiheng/selected-publications/collection/merged_collection.js",
 
   "_comment_5": "Fast mode: reduce metadata timeout/retries to avoid long stalls",
   "fast_mode": true,
