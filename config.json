@@ -6,14 +6,14 @@
   "include_arxiv": "true",
 
   "_comment_3": "Start year filter: leave empty, or use YYYY",
-  "start_date": "2025",
+  "start_date": "2024",
 
   "_comment_4": "Absolute path to an existing .js file (must exist)",
-  "existing_js_path": "/Users/guoyiheng/selected-publications/collection/merged_collection.js",
+  "existing_js_path": "/Users/guoyiheng/selected-publications/collection/new.js",
 
-  "_comment_5": "Parallel workers for enrichment (1 keeps old behavior; 4-8 is usually faster)",
-  "max_workers": 4,
+  "_comment_5": "Fast mode: reduce metadata timeout/retries to avoid long stalls",
+  "fast_mode": true,
 
-  "_comment_6": "Sleep seconds after each item log (0 is fastest)",
-  "per_item_sleep_seconds": 0
+  "_comment_6": "Use local metadata cache to speed up repeated runs",
+  "enable_metadata_cache": true
 }

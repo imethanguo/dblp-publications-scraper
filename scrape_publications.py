@@ -5,17 +5,28 @@ import json
 import re
 import argparse
 from datetime import datetime
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 import time
 import os
 import sys
 import signal
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-REQUEST_TIMEOUT = 10
-REQUEST_RETRIES = 6
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
+REQUEST_TIMEOUT = 5.0
+REQUEST_RETRIES = 3
 RETRY_SLEEP_SECONDS = 2.0
+METADATA_REQUEST_TIMEOUT = REQUEST_TIMEOUT
+METADATA_REQUEST_RETRIES = REQUEST_RETRIES
+METADATA_RETRY_SLEEP_SECONDS = RETRY_SLEEP_SECONDS
+DBLP_REQUEST_INTERVAL_SECONDS = 4.0
+ENABLE_METADATA_CACHE = True
 PER_ITEM_SLEEP_SECONDS = 1.0
 PER_PUBLICATION_TIMEOUT_SECONDS = 20
 MAX_WORKERS = 1
@@ -27,9 +38,23 @@ REQUEST_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-HTTP_SESSION = requests.Session()
-HTTP_SESSION.mount("http://", HTTPAdapter(pool_connections=32, pool_maxsize=32))
-HTTP_SESSION.mount("https://", HTTPAdapter(pool_connections=32, pool_maxsize=32))
+_THREAD_LOCAL = threading.local()
+_DBLP_RATE_LIMIT_LOCK = threading.Lock()
+_DBLP_NEXT_ALLOWED_TS = 0.0
+_METADATA_CACHE_LOCK = threading.Lock()
+_METADATA_CACHE = {}
+_METADATA_CACHE_DIRTY = False
+_METADATA_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".metadata_cache.json")
+
+
+def get_http_session():
+    session = getattr(_THREAD_LOCAL, "http_session", None)
+    if session is None:
+        session = requests.Session()
+        session.mount("http://", HTTPAdapter(pool_connections=32, pool_maxsize=32))
+        session.mount("https://", HTTPAdapter(pool_connections=32, pool_maxsize=32))
+        _THREAD_LOCAL.http_session = session
+    return session
 
 
 class PublicationTimeout(BaseException):
@@ -60,18 +85,210 @@ def get_url_text(url):
     return get_url_text_with_options(url, REQUEST_TIMEOUT, REQUEST_RETRIES, RETRY_SLEEP_SECONDS)
 
 
+def is_dblp_url(url):
+    try:
+        hostname = (urlparse(str(url or "")).hostname or "").lower()
+        return hostname.endswith("dblp.org") or hostname.endswith("dblp.uni-trier.de") or hostname.endswith("dblp.dagstuhl.de")
+    except Exception:
+        return False
+
+
+def wait_for_dblp_slot():
+    global _DBLP_NEXT_ALLOWED_TS
+    interval = max(0.0, float(DBLP_REQUEST_INTERVAL_SECONDS or 0.0))
+    if interval <= 0:
+        return
+    while True:
+        with _DBLP_RATE_LIMIT_LOCK:
+            now = time.time()
+            if now >= _DBLP_NEXT_ALLOWED_TS:
+                _DBLP_NEXT_ALLOWED_TS = now + interval
+                return
+            sleep_seconds = _DBLP_NEXT_ALLOWED_TS - now
+        if sleep_seconds > 0:
+            time.sleep(sleep_seconds)
+
+
+def parse_retry_after_seconds(header_value):
+    text = str(header_value or "").strip()
+    if not text:
+        return 0.0
+    if re.fullmatch(r"\d+", text):
+        try:
+            return max(0.0, float(text))
+        except Exception:
+            return 0.0
+    return 0.0
+
+
+def split_bibtex_entries(text):
+    entries = []
+    raw = str(text or "")
+    n = len(raw)
+    i = 0
+    while i < n:
+        at = raw.find("@", i)
+        if at < 0:
+            break
+        brace = raw.find("{", at)
+        if brace < 0:
+            break
+        depth = 0
+        j = brace
+        while j < n:
+            ch = raw[j]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    entries.append(raw[at:j + 1].strip())
+                    i = j + 1
+                    break
+            j += 1
+        else:
+            break
+    return entries
+
+
+def load_metadata_cache(cache_path):
+    global _METADATA_CACHE, _METADATA_CACHE_DIRTY
+    if not ENABLE_METADATA_CACHE:
+        _METADATA_CACHE = {}
+        _METADATA_CACHE_DIRTY = False
+        return
+    try:
+        if os.path.exists(cache_path):
+            with open(cache_path, "r", encoding="utf-8") as cache_file:
+                data = json.load(cache_file)
+            if isinstance(data, dict):
+                _METADATA_CACHE = data
+            else:
+                _METADATA_CACHE = {}
+        else:
+            _METADATA_CACHE = {}
+    except Exception:
+        _METADATA_CACHE = {}
+    _METADATA_CACHE_DIRTY = False
+
+
+def save_metadata_cache(cache_path):
+    global _METADATA_CACHE_DIRTY
+    if not ENABLE_METADATA_CACHE:
+        return
+    with _METADATA_CACHE_LOCK:
+        if not _METADATA_CACHE_DIRTY:
+            return
+        snapshot = dict(_METADATA_CACHE)
+        _METADATA_CACHE_DIRTY = False
+    try:
+        with open(cache_path, "w", encoding="utf-8") as cache_file:
+            json.dump(snapshot, cache_file, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def metadata_cache_key(paper_url):
+    text = str(paper_url or "").strip()
+    if not text:
+        return ""
+    doi = extract_doi_from_url(text)
+    if doi:
+        return f"doi:{doi.lower()}"
+    return f"url:{text}"
+
+
+def get_cached_metadata(paper_url):
+    if not ENABLE_METADATA_CACHE:
+        return None
+    key = metadata_cache_key(paper_url)
+    if not key:
+        return None
+    with _METADATA_CACHE_LOCK:
+        cached = _METADATA_CACHE.get(key)
+    if not isinstance(cached, dict):
+        return None
+    return {
+        "abstract": str(cached.get("abstract", "") or ""),
+        "date": str(cached.get("date", "") or ""),
+        "tags": cached.get("tags", []) if isinstance(cached.get("tags", []), list) else [],
+    }
+
+
+def put_cached_metadata(paper_url, metadata):
+    global _METADATA_CACHE_DIRTY
+    if not ENABLE_METADATA_CACHE:
+        return
+    key = metadata_cache_key(paper_url)
+    if not key:
+        return
+    payload = {
+        "abstract": str((metadata or {}).get("abstract", "") or ""),
+        "date": str((metadata or {}).get("date", "") or ""),
+        "tags": (metadata or {}).get("tags", []) if isinstance((metadata or {}).get("tags", []), list) else [],
+    }
+    with _METADATA_CACHE_LOCK:
+        previous = _METADATA_CACHE.get(key)
+        if previous != payload:
+            _METADATA_CACHE[key] = payload
+            _METADATA_CACHE_DIRTY = True
+
+
+def build_author_bib_url(author_pid_html_url):
+    text = str(author_pid_html_url or "").strip()
+    if not text:
+        return ""
+    if text.endswith(".html"):
+        return text[:-5] + ".bib"
+    if text.endswith("/"):
+        return text[:-1] + ".bib"
+    return text + ".bib"
+
+
+def build_bibtex_map_for_author(author_pid_html_url):
+    bib_url = build_author_bib_url(author_pid_html_url)
+    if not bib_url:
+        return {}
+    bib_text = get_url_text_with_options(bib_url, timeout_seconds=REQUEST_TIMEOUT, retries=max(1, REQUEST_RETRIES), retry_sleep_seconds=RETRY_SLEEP_SECONDS)
+    if not bib_text:
+        return {}
+    result = {}
+    for entry in split_bibtex_entries(bib_text):
+        title_match = re.search(r"\btitle\s*=\s*\{([\s\S]+?)\}\s*(?:,\s*\n|,\s*$)", entry, re.IGNORECASE)
+        if not title_match:
+            continue
+        title = re.sub(r"\s+", " ", title_match.group(1).replace("{", "").replace("}", "")).strip()
+        if not title:
+            continue
+        key = normalize_title_for_key(title)
+        if key and key not in result:
+            result[key] = entry
+    return result
+
+
 def get_url_text_with_options(url, timeout_seconds, retries, retry_sleep_seconds):
     last_exception = None
+    last_status_code = 0
+    dblp_target = is_dblp_url(url)
     for attempt in range(max(1, int(retries or 1))):
         try:
-            response = HTTP_SESSION.get(url, timeout=timeout_seconds, headers=REQUEST_HEADERS)
+            if dblp_target:
+                wait_for_dblp_slot()
+            response = get_http_session().get(url, timeout=timeout_seconds, headers=REQUEST_HEADERS)
+            last_status_code = int(response.status_code or 0)
             if response.status_code == 200:
                 return response.text
+            if response.status_code == 429:
+                retry_after_seconds = parse_retry_after_seconds(response.headers.get("Retry-After", ""))
+                sleep_seconds = max(float(retry_sleep_seconds or 0.0), retry_after_seconds)
+                if sleep_seconds > 0:
+                    time.sleep(sleep_seconds)
+                continue
         except Exception as exc:
             last_exception = exc
         if attempt < max(1, int(retries or 1)) - 1:
             time.sleep(retry_sleep_seconds)
-    if last_exception:
+    if last_exception or last_status_code:
         return ""
     return ""
 
@@ -195,14 +412,65 @@ def extract_year_from_entry(entry):
     return ""
 
 
-def extract_bibtex_from_view(bibtex_view_url, fast_mode=False):
+def extract_bibtex_from_view(
+    bibtex_view_url,
+    fast_mode=False,
+    timeout_seconds=None,
+    retries=None,
+    retry_sleep_seconds=None,
+):
     if not bibtex_view_url:
         return ""
     try:
+        request_timeout = timeout_seconds
+        request_retries = retries
+        request_retry_sleep = retry_sleep_seconds
+        if request_timeout is None:
+            request_timeout = 6 if fast_mode else REQUEST_TIMEOUT
+        if request_retries is None:
+            request_retries = 1 if fast_mode else REQUEST_RETRIES
+        if request_retry_sleep is None:
+            request_retry_sleep = 0 if fast_mode else RETRY_SLEEP_SECONDS
+
+        # DBLP view pages often expose a direct .bib endpoint that is more reliable
+        # than parsing the HTML page under concurrent requests.
+        direct_bib_urls = []
+        view_base = re.sub(r"\?.*$", "", str(bibtex_view_url or "").strip())
+        if "dblp.org/rec/" in view_base:
+            if view_base.endswith(".html"):
+                rec_base = view_base[:-5]
+            else:
+                rec_base = view_base
+            if rec_base:
+                direct_bib_urls.append(f"{rec_base}.bib")
+                direct_bib_urls.append(f"{rec_base}.bib?param=1")
+
+        for direct_bib_url in direct_bib_urls:
+            bib_text = get_url_text_with_options(
+                direct_bib_url,
+                timeout_seconds=request_timeout,
+                retries=request_retries,
+                retry_sleep_seconds=request_retry_sleep,
+            )
+            if bib_text:
+                bib_text = bib_text.strip()
+                if bib_text.startswith("@"):
+                    return bib_text
+
         if fast_mode:
-            bibtex_view_text = get_url_text_with_options(bibtex_view_url, timeout_seconds=6, retries=1, retry_sleep_seconds=0)
+            bibtex_view_text = get_url_text_with_options(
+                bibtex_view_url,
+                timeout_seconds=request_timeout,
+                retries=request_retries,
+                retry_sleep_seconds=request_retry_sleep,
+            )
         else:
-            bibtex_view_text = get_url_text(bibtex_view_url)
+            bibtex_view_text = get_url_text_with_options(
+                bibtex_view_url,
+                timeout_seconds=request_timeout,
+                retries=request_retries,
+                retry_sleep_seconds=request_retry_sleep,
+            )
         if not bibtex_view_text:
             return ""
         bibtex_text_match = re.search(r"@\w+\{[\s\S]+?\n\}", bibtex_view_text)
@@ -218,8 +486,12 @@ def extract_bibtex_from_view(bibtex_view_url, fast_mode=False):
             return bibtex_div.text.strip()
 
         bib_url = ""
+        direct_bib_link = bibtex_view_soup.find("link", attrs={"type": "application/x-bibtex"})
+        if direct_bib_link and direct_bib_link.get("href"):
+            bib_url = urljoin(bibtex_view_url, direct_bib_link["href"])
+
         biburl_match = re.search(r"biburl\s*=\s*\{(https?://[^}]+\.bib)\}", bibtex_view_soup.get_text("\n"))
-        if biburl_match:
+        if not bib_url and biburl_match:
             bib_url = biburl_match.group(1)
         else:
             bib_link = bibtex_view_soup.find("a", href=re.compile(r"\.bib(\?|$)"))
@@ -229,15 +501,198 @@ def extract_bibtex_from_view(bibtex_view_url, fast_mode=False):
         if not bib_url:
             return ""
 
-        if fast_mode:
-            bib_text = get_url_text_with_options(bib_url, timeout_seconds=6, retries=1, retry_sleep_seconds=0)
-        else:
-            bib_text = get_url_text(bib_url)
+        bib_text = get_url_text_with_options(
+            bib_url,
+            timeout_seconds=request_timeout,
+            retries=request_retries,
+            retry_sleep_seconds=request_retry_sleep,
+        )
         if not bib_text:
             return ""
         return bib_text.strip()
     except Exception:
         return ""
+
+
+def build_direct_bib_url_from_view_url(bibtex_view_url):
+    text = str(bibtex_view_url or "").strip()
+    if not text:
+        return ""
+
+    if text.endswith(".bib"):
+        return text
+
+    parsed = text
+    if "?" in parsed:
+        parsed = parsed.split("?", 1)[0]
+
+    if parsed.endswith(".html"):
+        parsed = parsed[:-5]
+
+    if not parsed or "/rec/" not in parsed:
+        return ""
+
+    return f"{parsed}.bib"
+
+
+def extract_bibtex_from_direct_bib_url(bibtex_url, timeout_seconds, retries, retry_sleep_seconds):
+    if not bibtex_url:
+        return ""
+    text = get_url_text_with_options(
+        bibtex_url,
+        timeout_seconds=timeout_seconds,
+        retries=retries,
+        retry_sleep_seconds=retry_sleep_seconds,
+    )
+    if not text:
+        return ""
+    if re.search(r"@\w+\{", text):
+        return text.strip()
+    return ""
+
+
+def extract_bibtex_with_fallback(bibtex_view_url, prefer_fast=False):
+    if not bibtex_view_url:
+        return ""
+
+    direct_bib_url = build_direct_bib_url_from_view_url(bibtex_view_url)
+    if direct_bib_url:
+        bibtex = extract_bibtex_from_direct_bib_url(
+            direct_bib_url,
+            timeout_seconds=8 if prefer_fast else REQUEST_TIMEOUT,
+            retries=2 if prefer_fast else REQUEST_RETRIES,
+            retry_sleep_seconds=0.5 if prefer_fast else RETRY_SLEEP_SECONDS,
+        )
+        if bibtex:
+            return bibtex
+
+    bibtex = extract_bibtex_from_view(bibtex_view_url, fast_mode=prefer_fast)
+    if bibtex:
+        return bibtex
+
+    if prefer_fast:
+        bibtex = extract_bibtex_from_view(bibtex_view_url, fast_mode=False)
+        if bibtex:
+            return bibtex
+
+    # Final resilient retry for transient failures under concurrent fetching.
+    return extract_bibtex_from_view(
+        bibtex_view_url,
+        fast_mode=False,
+        timeout_seconds=max(REQUEST_TIMEOUT, 15),
+        retries=max(REQUEST_RETRIES, 4),
+        retry_sleep_seconds=max(RETRY_SLEEP_SECONDS, 1.0),
+    )
+
+
+def recover_missing_bibtex_fields(publications):
+    candidates = []
+    for publication in publications:
+        if publication.get("skip"):
+            continue
+        if publication.get("bibtex"):
+            continue
+        if publication.get("bibtexViewUrl"):
+            candidates.append(publication)
+
+    if not candidates:
+        return 0
+
+    def _recover_single(publication):
+        bibtex_view_url = publication.get("bibtexViewUrl", "")
+        if not bibtex_view_url:
+            return ""
+
+        # Fast path for concurrent mode: direct .bib endpoint is usually the
+        # most stable and significantly faster than parsing HTML pages.
+        direct_bib_url = build_direct_bib_url_from_view_url(bibtex_view_url)
+        if direct_bib_url:
+            bibtex = extract_bibtex_from_direct_bib_url(
+                direct_bib_url,
+                timeout_seconds=8,
+                retries=2,
+                retry_sleep_seconds=0.5,
+            )
+            if bibtex:
+                return bibtex
+
+        bibtex = extract_bibtex_from_view(
+            bibtex_view_url,
+            fast_mode=False,
+            timeout_seconds=8,
+            retries=2,
+            retry_sleep_seconds=0.5,
+        )
+        if bibtex:
+            return bibtex
+
+        return ""
+
+    recovered = 0
+    workers = max(1, min(int(MAX_WORKERS or 1), 8))
+    if workers > 1 and len(candidates) > 1:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_publication = {
+                executor.submit(_recover_single, publication): publication
+                for publication in candidates
+            }
+            for future in as_completed(future_to_publication):
+                publication = future_to_publication[future]
+                try:
+                    bibtex = future.result()
+                except Exception:
+                    bibtex = ""
+                if not bibtex:
+                    continue
+
+                publication["bibtex"] = bibtex
+                recovered += 1
+
+                if not publication.get("date"):
+                    year_text = extract_year_from_bibtex(bibtex)
+                    if year_text:
+                        publication["date"] = year_text
+
+                venue, venue_short = extract_venue_from_bibtex(bibtex)
+                if venue and not publication.get("venue"):
+                    publication["venue"] = venue
+                if venue_short and not publication.get("venueShort"):
+                    publication["venueShort"] = venue_short
+
+                if not publication.get("paperUrl"):
+                    bibtex_url = extract_url_from_bibtex(bibtex)
+                    if bibtex_url:
+                        publication["paperUrl"] = bibtex_url
+                        if is_arxiv_like_url(bibtex_url) and not publication.get("arxivUrl"):
+                            publication["arxivUrl"] = bibtex_url
+    else:
+        for publication in candidates:
+            bibtex = _recover_single(publication)
+            if not bibtex:
+                continue
+
+            publication["bibtex"] = bibtex
+            recovered += 1
+
+            if not publication.get("date"):
+                year_text = extract_year_from_bibtex(bibtex)
+                if year_text:
+                    publication["date"] = year_text
+
+            venue, venue_short = extract_venue_from_bibtex(bibtex)
+            if venue and not publication.get("venue"):
+                publication["venue"] = venue
+            if venue_short and not publication.get("venueShort"):
+                publication["venueShort"] = venue_short
+
+            if not publication.get("paperUrl"):
+                bibtex_url = extract_url_from_bibtex(bibtex)
+                if bibtex_url:
+                    publication["paperUrl"] = bibtex_url
+                    if is_arxiv_like_url(bibtex_url) and not publication.get("arxivUrl"):
+                        publication["arxivUrl"] = bibtex_url
+
+    return recovered
 
 
 def extract_year_from_bibtex(bibtex_text):
@@ -332,7 +787,7 @@ def fetch_metadata_from_crossref(paper_url):
 
     crossref_url = f"https://api.crossref.org/works/{doi}"
     try:
-        response = HTTP_SESSION.get(crossref_url, timeout=REQUEST_TIMEOUT, headers=REQUEST_HEADERS)
+        response = get_http_session().get(crossref_url, timeout=METADATA_REQUEST_TIMEOUT, headers=REQUEST_HEADERS)
         if response.status_code != 200:
             return metadata
 
@@ -380,12 +835,12 @@ def fetch_metadata_from_openalex(paper_url):
 
     openalex_url = f"https://api.openalex.org/works/https://doi.org/{doi}"
     last_error = None
-    for attempt in range(REQUEST_RETRIES):
+    for attempt in range(METADATA_REQUEST_RETRIES):
         try:
-            response = HTTP_SESSION.get(openalex_url, timeout=REQUEST_TIMEOUT, headers=REQUEST_HEADERS)
+            response = get_http_session().get(openalex_url, timeout=METADATA_REQUEST_TIMEOUT, headers=REQUEST_HEADERS)
             if response.status_code != 200:
-                if attempt < REQUEST_RETRIES - 1 and response.status_code >= 500:
-                    time.sleep(RETRY_SLEEP_SECONDS)
+                if attempt < METADATA_REQUEST_RETRIES - 1 and response.status_code >= 500:
+                    time.sleep(METADATA_RETRY_SLEEP_SECONDS)
                     continue
                 return metadata
 
@@ -402,8 +857,8 @@ def fetch_metadata_from_openalex(paper_url):
             return metadata
         except Exception as exc:
             last_error = exc
-            if attempt < REQUEST_RETRIES - 1:
-                time.sleep(RETRY_SLEEP_SECONDS)
+            if attempt < METADATA_REQUEST_RETRIES - 1:
+                time.sleep(METADATA_RETRY_SLEEP_SECONDS)
     if last_error:
         print(f"OpenAlex metadata fetch failed for DOI {doi}: {last_error}")
     return metadata
@@ -491,7 +946,7 @@ def fetch_metadata_from_arxiv_url(paper_url):
         return metadata
 
     try:
-        response = HTTP_SESSION.get(arxiv_abs_url, timeout=8, headers=REQUEST_HEADERS)
+        response = get_http_session().get(arxiv_abs_url, timeout=8, headers=REQUEST_HEADERS)
         if response.status_code != 200:
             return metadata
 
@@ -529,7 +984,7 @@ def recover_arxiv_metadata_quick(publication):
         return publication
 
     try:
-        response = HTTP_SESSION.get(arxiv_abs_url, timeout=8, headers=REQUEST_HEADERS)
+        response = get_http_session().get(arxiv_abs_url, timeout=8, headers=REQUEST_HEADERS)
         if response.status_code != 200:
             return publication
 
@@ -594,10 +1049,22 @@ def fetch_metadata_from_paper_url(paper_url):
     metadata = {"abstract": "", "date": "", "tags": []}
     if not paper_url:
         return metadata
+
+    cached = get_cached_metadata(paper_url)
+    if cached is not None:
+        return cached
+
     if is_arxiv_like_url(paper_url):
-        return fetch_metadata_from_arxiv_url(paper_url)
+        metadata = fetch_metadata_from_arxiv_url(paper_url)
+        put_cached_metadata(paper_url, metadata)
+        return metadata
     try:
-        paper_text = get_url_text(paper_url)
+        paper_text = get_url_text_with_options(
+            paper_url,
+            timeout_seconds=METADATA_REQUEST_TIMEOUT,
+            retries=METADATA_REQUEST_RETRIES,
+            retry_sleep_seconds=METADATA_RETRY_SLEEP_SECONDS,
+        )
         if not paper_text:
             crossref_metadata = fetch_metadata_from_crossref(paper_url)
             if not metadata.get("abstract"):
@@ -613,6 +1080,7 @@ def fetch_metadata_from_paper_url(paper_url):
                     metadata["date"] = openalex_metadata.get("date", "")
 
             metadata["tags"] = []
+            put_cached_metadata(paper_url, metadata)
             return metadata
         paper_soup = BeautifulSoup(paper_text, "html.parser")
 
@@ -625,6 +1093,7 @@ def fetch_metadata_from_paper_url(paper_url):
                 if not metadata.get("date"):
                     metadata["date"] = openalex_metadata.get("date", "")
             metadata["tags"] = []
+            put_cached_metadata(paper_url, metadata)
             return metadata
 
         abstract_text = ""
@@ -729,7 +1198,7 @@ def fetch_metadata_from_paper_url(paper_url):
             if not metadata.get("date"):
                 metadata["date"] = openalex_metadata.get("date", "")
         metadata["tags"] = []
-
+        put_cached_metadata(paper_url, metadata)
         return metadata
     except Exception:
         return metadata
@@ -766,17 +1235,15 @@ def enrich_publication(publication, include_arxiv=False, start_date=""):
         or is_arxiv_like_url(publication.get("arxivUrl", ""))
     ):
         publication["skip"] = True
-        publication.pop("bibtexViewUrl", None)
-        publication.pop("dblpIssueUrl", None)
         return publication
 
     bibtex_view_url = publication.get("bibtexViewUrl", "")
-    if bibtex_view_url:
+    if bibtex_view_url and not publication.get("bibtex"):
         is_arxiv_candidate = (
             is_arxiv_like_url(publication.get("paperUrl", ""))
             or is_arxiv_like_url(publication.get("arxivUrl", ""))
         )
-        publication["bibtex"] = extract_bibtex_from_view(bibtex_view_url, fast_mode=is_arxiv_candidate)
+        publication["bibtex"] = extract_bibtex_with_fallback(bibtex_view_url, prefer_fast=is_arxiv_candidate)
 
     venue, venue_short = extract_venue_from_bibtex(publication.get("bibtex", ""))
     if venue:
@@ -807,8 +1274,6 @@ def enrich_publication(publication, include_arxiv=False, start_date=""):
 
     if not include_arxiv and paper_url and is_arxiv_like_url(paper_url):
         publication["skip"] = True
-        publication.pop("bibtexViewUrl", None)
-        publication.pop("dblpIssueUrl", None)
         return publication
 
     year_text = extract_year_from_bibtex(publication.get("bibtex", ""))
@@ -816,14 +1281,16 @@ def enrich_publication(publication, include_arxiv=False, start_date=""):
         publication["date"] = year_text
     if start_date and publication.get("date") and not is_on_or_after_start_year(publication.get("date", ""), start_date):
         publication["skip"] = True
-        publication.pop("bibtexViewUrl", None)
-        publication.pop("dblpIssueUrl", None)
         return publication
 
-    if paper_url:
+    needs_abstract = not publication.get("abstract")
+    needs_date = not publication.get("date")
+    if paper_url and (needs_abstract or needs_date):
         metadata = fetch_metadata_from_paper_url(paper_url)
-        publication["abstract"] = metadata.get("abstract", "")
-        publication["date"] = metadata.get("date", "")
+        if needs_abstract and metadata.get("abstract"):
+            publication["abstract"] = metadata.get("abstract", "")
+        if needs_date and metadata.get("date"):
+            publication["date"] = metadata.get("date", "")
         publication["tags"] = []
 
     if not publication.get("date"):
@@ -833,9 +1300,6 @@ def enrich_publication(publication, include_arxiv=False, start_date=""):
 
     if start_date and not is_on_or_after_start_year(publication.get("date", ""), start_date):
         publication["skip"] = True
-
-    publication.pop("bibtexViewUrl", None)
-    publication.pop("dblpIssueUrl", None)
     return publication
 
 
@@ -854,6 +1318,7 @@ def scrape_dblp_publications(url, include_arxiv=False, start_date=""):
         raise Exception(f"Failed to fetch URL after retries: {url}")
 
     soup = BeautifulSoup(page_text, 'html.parser')
+    author_bibtex_map = build_bibtex_map_for_author(url)
 
     # Find all publication entries
     publications = []
@@ -906,6 +1371,10 @@ def scrape_dblp_publications(url, include_arxiv=False, start_date=""):
             "dblpIssueUrl": issue_url,
         }
 
+        map_key = normalize_title_for_key(title)
+        if map_key and map_key in author_bibtex_map:
+            publication["bibtex"] = author_bibtex_map[map_key]
+
         if publication.get("paperUrl") and "arxiv" in publication["paperUrl"].lower() and not publication.get("arxivUrl"):
             publication["arxivUrl"] = publication["paperUrl"]
 
@@ -930,45 +1399,88 @@ def scrape_dblp_publications(url, include_arxiv=False, start_date=""):
             else:
                 enrich_publication(pub, include_arxiv, start_date)
         except PublicationTimeout:
-            print(f"抓取超时({PER_PUBLICATION_TIMEOUT_SECONDS}s): {title}")
             recover_arxiv_metadata_quick(pub)
-            partial_content = {k: v for k, v in pub.items() if v}
-            print("已抓取到的content:")
-            print(json.dumps(partial_content, ensure_ascii=False, indent=2))
-            pub.pop("bibtexViewUrl", None)
-            pub.pop("dblpIssueUrl", None)
         except Exception as exc:
-            print(f"抓取异常: {title} -> {exc}")
-            pub.pop("bibtexViewUrl", None)
-            pub.pop("dblpIssueUrl", None)
+            print(f"Fetch exception: {title} -> {exc}")
 
-    workers = max(1, int(MAX_WORKERS or 1))
-    if workers > 1:
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            list(executor.map(_enrich_single, publications))
-    else:
-        for publication in publications:
-            _enrich_single(publication)
+    progress_started_at = time.time()
+    progress_stop_event = threading.Event()
+    progress_lock = threading.Lock()
+    total_items = len(publications)
+    completed_items = 0
+    last_progress_line_len = 0
+
+    def _render_progress_line(completed):
+        nonlocal last_progress_line_len
+        elapsed = max(0.0, time.time() - progress_started_at)
+        safe_total = max(1, total_items)
+        ratio = min(1.0, max(0.0, completed / safe_total))
+        bar_width = 24
+        filled = int(bar_width * ratio)
+        bar = "#" * filled + "-" * (bar_width - filled)
+
+        avg_seconds_per_item = (elapsed / completed) if completed > 0 else 6.0
+        remaining = max(0, total_items - completed)
+        eta_seconds = int(remaining * avg_seconds_per_item)
+        elapsed_seconds = int(elapsed)
+
+        line_text = f"Progress [{bar}] {completed}/{total_items} elapsed:{elapsed_seconds}s eta:{eta_seconds}s"
+        padding = ""
+        if last_progress_line_len > len(line_text):
+            padding = " " * (last_progress_line_len - len(line_text))
+        last_progress_line_len = len(line_text)
+
+        print(
+            f"\r{line_text}{padding}",
+            end="",
+            flush=True,
+        )
+
+    def _progress_loop():
+        while not progress_stop_event.is_set():
+            with progress_lock:
+                snapshot_completed = completed_items
+            _render_progress_line(snapshot_completed)
+            if progress_stop_event.wait(1.0):
+                break
+        with progress_lock:
+            snapshot_completed = completed_items
+        _render_progress_line(snapshot_completed)
+
+    progress_thread = threading.Thread(target=_progress_loop, daemon=True)
+    progress_thread.start()
+
+    try:
+        workers = max(1, int(MAX_WORKERS or 1))
+        if workers > 1:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                future_to_publication = {
+                    executor.submit(_enrich_single, publication): publication
+                    for publication in publications
+                }
+                for future in as_completed(future_to_publication):
+                    publication = future_to_publication[future]
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        print(f"Fetch exception: {publication.get('title', '')} -> {exc}")
+                    with progress_lock:
+                        completed_items += 1
+        else:
+            for publication in publications:
+                _enrich_single(publication)
+                with progress_lock:
+                    completed_items += 1
+
+        recover_missing_bibtex_fields(publications)
+    finally:
+        progress_stop_event.set()
+        progress_thread.join(timeout=2)
+        print()
 
     for publication in publications:
-        if publication.get("skip"):
-            continue
-
-        title = publication.get("title", "")
-        keys_to_check = ["date", "authors", "venue", "venueShort", "abstract", "arxivUrl", "paperUrl", "bibtex"]
-        success_keys = []
-        empty_keys = []
-        for key in keys_to_check:
-            value = publication.get(key)
-            if value:
-                success_keys.append(key)
-            else:
-                empty_keys.append(key)
-        print(f"抓取完成: {title}")
-        print(f"成功项: {', '.join(success_keys) if success_keys else '无'}")
-        print(f"未成功项: {', '.join(empty_keys) if empty_keys else '无'}")
-        if PER_ITEM_SLEEP_SECONDS > 0:
-            time.sleep(PER_ITEM_SLEEP_SECONDS)
+        publication.pop("bibtexViewUrl", None)
+        publication.pop("dblpIssueUrl", None)
 
     return publications, bibtex_view_urls
 
@@ -1012,7 +1524,7 @@ def load_js_array(filepath):
 
     data = json.loads(content)
     if not isinstance(data, list):
-        raise ValueError(f"文件内容不是数组: {filepath}")
+        raise ValueError(f"File content is not an array: {filepath}")
     return data
 
 
@@ -1091,6 +1603,9 @@ def extract_arxiv_id(publication):
 
 
 def publication_dedup_key(publication):
+    if not isinstance(publication, dict):
+        return "invalid:unknown"
+
     doi = extract_doi(publication)
     if doi:
         return f"doi:{doi}"
@@ -1113,6 +1628,8 @@ def merge_into_existing_js_file(existing_js_filepath, new_publications):
     merged_by_key = {}
     ordered_keys = []
     for item in existing_publications:
+        if not isinstance(item, dict):
+            continue
         key = publication_dedup_key(item)
         if key not in merged_by_key:
             merged_by_key[key] = item
@@ -1123,6 +1640,8 @@ def merge_into_existing_js_file(existing_js_filepath, new_publications):
     deduped_titles = []
     added_titles = []
     for item in new_publications:
+        if not isinstance(item, dict):
+            continue
         key = publication_dedup_key(item)
         title = (item.get("title", "") or "").strip() or "(untitled)"
         if key in merged_by_key:
@@ -1206,8 +1725,12 @@ def run_scrape_flow(
     existing_js_path="",
     max_workers=None,
     per_item_sleep_seconds=None,
+    fast_mode=False,
+    dblp_request_interval_seconds=None,
+    enable_metadata_cache=True,
 ):
-    global MAX_WORKERS, PER_ITEM_SLEEP_SECONDS
+    global MAX_WORKERS, PER_ITEM_SLEEP_SECONDS, DBLP_REQUEST_INTERVAL_SECONDS, ENABLE_METADATA_CACHE
+    global METADATA_REQUEST_TIMEOUT, METADATA_REQUEST_RETRIES, METADATA_RETRY_SLEEP_SECONDS
     if max_workers is not None:
         try:
             MAX_WORKERS = max(1, int(max_workers))
@@ -1218,10 +1741,25 @@ def run_scrape_flow(
             PER_ITEM_SLEEP_SECONDS = max(0.0, float(per_item_sleep_seconds))
         except Exception:
             PER_ITEM_SLEEP_SECONDS = 1.0
+    if dblp_request_interval_seconds is not None:
+        try:
+            DBLP_REQUEST_INTERVAL_SECONDS = max(0.0, float(dblp_request_interval_seconds))
+        except Exception:
+            DBLP_REQUEST_INTERVAL_SECONDS = 4.0
+    ENABLE_METADATA_CACHE = bool(enable_metadata_cache)
+
+    if bool(fast_mode):
+        METADATA_REQUEST_TIMEOUT = 5
+        METADATA_REQUEST_RETRIES = 2
+        METADATA_RETRY_SLEEP_SECONDS = 0.5
+    else:
+        METADATA_REQUEST_TIMEOUT = REQUEST_TIMEOUT
+        METADATA_REQUEST_RETRIES = REQUEST_RETRIES
+        METADATA_RETRY_SLEEP_SECONDS = RETRY_SLEEP_SECONDS
 
     url = (url or "").strip() or DEFAULT_DBLP_URL
     if not re.match(r"^https://dblp\.org/pid/[^/]+/[^/]+\.html$", url):
-        print("错误：网址格式不正确，示例：https://dblp.org/pid/c/SCCheung.html")
+        print("Error: Invalid URL format. Example: https://dblp.org/pid/c/SCCheung.html")
         return 1
     print(f"Scraping publications from {url}...")
 
@@ -1232,23 +1770,19 @@ def run_scrape_flow(
     if start_date_input:
         start_date = parse_start_year(start_date_input)
         if not start_date:
-            print("错误：起始年份格式无效，请输入 YYYY")
+            print("Error: Invalid start year format. Please use YYYY")
             return 1
 
     author_name = extract_author_name_from_dblp(url)
     if not author_name:
-        print("警告：无法从该网址提取作者姓名，继续抓取。")
+        print("Warning: Could not extract author name from URL. Continue scraping.")
     try:
+        load_metadata_cache(_METADATA_CACHE_PATH)
         publications, bibtex_view_urls = scrape_dblp_publications(
             url,
             include_arxiv=include_arxiv,
             start_date=start_date,
         )
-        print(f"Successfully scraped {len(publications)} publications.")
-        if bibtex_view_urls:
-            print("BibTeX view URLs found:")
-            for bibtex_url in bibtex_view_urls:
-                print(bibtex_url)
 
         # Format publications to match the required JSON and JS structure
         formatted_publications = format_publications(
@@ -1257,7 +1791,18 @@ def run_scrape_flow(
             start_date=start_date,
         )
 
-        print(f"筛选后保留 {len(formatted_publications)} 条 publication。")
+        print(f"Found {len(formatted_publications)} publications:")
+        keys_to_check = ["date", "authors", "venue", "venueShort", "abstract", "arxivUrl", "paperUrl", "bibtex"]
+        for index, item in enumerate(formatted_publications, 1):
+            title = str(item.get("title", "") or "(untitled)").strip()
+            found_keys = []
+            for key in keys_to_check:
+                value = item.get(key)
+                if value:
+                    found_keys.append(key)
+            found_text = ", ".join(found_keys) if found_keys else "none"
+            print(f"{index}. {title}")
+            print(f"   content: {found_text}")
 
         js_filepath = (existing_js_path or "").strip()
         if not js_filepath:
@@ -1268,10 +1813,11 @@ def run_scrape_flow(
             return 1
         merge_into_existing_js_file(js_filepath, formatted_publications)
         print(f"Publications saved to existing file: {js_filepath}")
-        print("Skipped merged_collection update and git auto flow for custom target mode.")
+        save_metadata_cache(_METADATA_CACHE_PATH)
         return 0
 
     except Exception as e:
+        save_metadata_cache(_METADATA_CACHE_PATH)
         print(f"An error occurred: {e}")
         return 1
 
@@ -1301,6 +1847,9 @@ def load_run_config(config_path):
         "existing_js_path": str(config_data.get("existing_js_path", "") or "").strip(),
         "max_workers": config_data.get("max_workers", MAX_WORKERS),
         "per_item_sleep_seconds": config_data.get("per_item_sleep_seconds", PER_ITEM_SLEEP_SECONDS),
+        "fast_mode": bool(config_data.get("fast_mode", False)),
+        "dblp_request_interval_seconds": config_data.get("dblp_request_interval_seconds", DBLP_REQUEST_INTERVAL_SECONDS),
+        "enable_metadata_cache": bool(config_data.get("enable_metadata_cache", True)),
     }
 
 
@@ -1330,6 +1879,9 @@ def main():
         existing_js_path=run_config["existing_js_path"],
         max_workers=run_config["max_workers"],
         per_item_sleep_seconds=run_config["per_item_sleep_seconds"],
+        fast_mode=run_config["fast_mode"],
+        dblp_request_interval_seconds=run_config["dblp_request_interval_seconds"],
+        enable_metadata_cache=run_config["enable_metadata_cache"],
     )
     if exit_code != 0:
         sys.exit(exit_code)

@@ -73,7 +73,7 @@ case "$CMD" in
   ""|r|run)
     shift || true
     ensure_runtime_deps
-    exec "$(pick_python)" "$SCRIPT" "$@"
+    exec "$(pick_python)" -u "$SCRIPT" "$@"
     ;;
   i|install|deps)
     shift || true
@@ -87,4 +87,4 @@ case "$CMD" in
 esac
 
 ensure_runtime_deps
-exec "$(pick_python)" "$SCRIPT" "$@"
+exec "$(pick_python)" -u "$SCRIPT" "$@"

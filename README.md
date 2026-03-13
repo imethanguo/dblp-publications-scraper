@@ -45,6 +45,9 @@ Edit `config.json`, then run:
 - `include_arxiv`: `y`/`n` (or `true`/`false`)
 - `start_date`: empty or `YYYY`
 - `existing_js_path`: required
+- `max_workers`: parallel workers for enrichment
+- `per_item_sleep_seconds`: pause after each item log
+- `fast_mode`: `true`/`false`, reduce metadata timeout/retries for faster runs
 
 Example:
 
@@ -53,7 +56,10 @@ Example:
   "url": "https://dblp.org/pid/257/0002.html",
   "include_arxiv": "N",
   "start_date": "2025",
-  "existing_js_path": "/Users/guoyiheng/dblp-publications-scraper/my.js"
+  "existing_js_path": "/Users/guoyiheng/dblp-publications-scraper/my.js",
+  "max_workers": 4,
+  "per_item_sleep_seconds": 0,
+  "fast_mode": true
 }
 ```
 
