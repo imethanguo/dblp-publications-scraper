@@ -1324,6 +1324,10 @@ def scrape_dblp_publications(url, include_arxiv=False, start_date=""):
     publications = []
     bibtex_view_urls = []
     for entry in soup.find_all('li'):
+        entry_text = entry.get_text(" ", strip=True)
+        if re.match(r"^\s*\[d[^\]]*\]", entry_text, re.IGNORECASE):
+            continue
+
         title_tag = entry.find('span', class_='title')
         if not title_tag:
             continue  # Skip entries without a title
@@ -1645,8 +1649,8 @@ def merge_into_existing_js_file(existing_js_filepath, new_publications):
         key = publication_dedup_key(item)
         title = (item.get("title", "") or "").strip() or "(untitled)"
         if key in merged_by_key:
-            merge_publication_items(merged_by_key[key], item)
             deduped_titles.append(title)
+            continue
         else:
             merged_by_key[key] = item
             ordered_keys.append(key)

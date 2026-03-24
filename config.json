@@ -3,13 +3,13 @@
   "url": "https://dblp.org/pid/c/SCCheung.html",
 
   "_comment_2": "Whether to include arXiv papers: true/false",
-  "include_arxiv": "true",
+  "include_arxiv": "false",
 
   "_comment_3": "Start year filter: leave empty, or use YYYY",
-  "start_date": "",
+  "start_date": "2020",
 
   "_comment_4": "Absolute path to an existing .js file (must exist)",
-  "existing_js_path": "/Users/guoyiheng/selected-publications/collection/merged_collection.js",
+  "existing_js_path": "/Users/guoyiheng/selected-publications/collection/merged_collection(old).js",
 
   "_comment_5": "Fast mode: reduce metadata timeout/retries to avoid long stalls",
   "fast_mode": true,
