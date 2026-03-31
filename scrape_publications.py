@@ -45,6 +45,327 @@ _METADATA_CACHE_LOCK = threading.Lock()
 _METADATA_CACHE = {}
 _METADATA_CACHE_DIRTY = False
 _METADATA_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".metadata_cache.json")
+VENUE_SHORT_LLM_CONFIG = {
+    "enabled": False,
+    "base_url": "",
+    "api_key": "",
+    "model": "",
+    "timeout_seconds": 20,
+    "temperature": 0,
+    "reference_js_path": "",
+}
+
+VENUE_SHORT_REFERENCE_EXAMPLES = [
+    ("ACM Transactions on Software Engineering and Methodology", "TOSEM"),
+    ("IEEE Transactions on Software Engineering", "TSE"),
+    ("Empirical Software Engineering", "Empir. Softw. Eng."),
+    ("Automated Software Engineering", "Autom. Softw. Eng."),
+    ("Proceedings of the ACM on Software Engineering", "FSE"),
+    ("International Conference on Software Engineering", "ICSE"),
+    ("IEEE/ACM International Conference on Automated Software Engineering", "ASE"),
+    ("ACM SIGSOFT International Symposium on Software Testing and Analysis", "ISSTA"),
+    ("The ACM Joint European Software Engineering Conference and Symposium on the Foundations of Software Engineering", "ESEC/FSE"),
+    ("Journal of Systems and Software", "JSS"),
+    ("Information and Software Technology", "IST"),
+    ("IEEE Conference on Software Testing", "ICST"),
+    ("International Conference on Software Analysis, Evolution and Reengineering", "SANER"),
+    ("Thirty-Ninth AAAI Conference on Artificial Intelligence", "AAAI"),
+    ("the 63rd Annual Meeting of the Association for Computational Linguistics", "ACL"),
+    ("The 32nd International Joint Conference on Artificial Intelligence", "IJCAI"),
+    ("USENIX Security Symposium", "USENIX Security"),
+    ("IEEE Symposium on Security and Privacy", "S&P"),
+    ("IEEE Transactions on Services Computing", "TSC"),
+    ("IEEE Internet of Things Journal", "IoT-J"),
+]
+
+_VENUE_SHORT_REFERENCE_CACHE = {}
+
+
+def parse_bool(value, default=False):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def load_venue_short_llm_config(raw_config):
+    config_data = raw_config if isinstance(raw_config, dict) else {}
+
+    enabled = parse_bool(
+        config_data.get("venue_short_llm_enabled", os.getenv("VENUE_SHORT_LLM_ENABLED", "false")),
+        default=False,
+    )
+    base_url = str(
+        config_data.get("venue_short_llm_base_url", os.getenv("VENUE_SHORT_LLM_BASE_URL", "")) or ""
+    ).strip()
+    api_key = str(
+        config_data.get("venue_short_llm_api_key", os.getenv("VENUE_SHORT_LLM_API_KEY", "")) or ""
+    ).strip()
+    model = str(
+        config_data.get("venue_short_llm_model", os.getenv("VENUE_SHORT_LLM_MODEL", "")) or ""
+    ).strip()
+
+    timeout_raw = config_data.get("venue_short_llm_timeout_seconds", os.getenv("VENUE_SHORT_LLM_TIMEOUT_SECONDS", "20"))
+    temperature_raw = config_data.get("venue_short_llm_temperature", os.getenv("VENUE_SHORT_LLM_TEMPERATURE", "0"))
+
+    try:
+        timeout_seconds = max(1.0, float(timeout_raw))
+    except Exception:
+        timeout_seconds = 20.0
+
+    try:
+        temperature = min(1.0, max(0.0, float(temperature_raw)))
+    except Exception:
+        temperature = 0.0
+
+    default_reference_js_path = os.path.normpath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "collection", "merged_collection(updateVenueShort&sorted).js")
+    )
+    reference_js_path = str(
+        config_data.get("venue_short_reference_js_path", os.getenv("VENUE_SHORT_REFERENCE_JS_PATH", default_reference_js_path)) or ""
+    ).strip()
+    if reference_js_path and not os.path.isabs(reference_js_path):
+        reference_js_path = os.path.normpath(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), reference_js_path)
+        )
+
+    return {
+        "enabled": bool(enabled),
+        "base_url": base_url,
+        "api_key": api_key,
+        "model": model,
+        "timeout_seconds": timeout_seconds,
+        "temperature": temperature,
+        "reference_js_path": reference_js_path,
+    }
+
+
+def sanitize_venue_short_candidate(text):
+    value = str(text or "").strip()
+    if not value:
+        return ""
+
+    value = value.strip().strip("`\"'")
+    if not value:
+        return ""
+
+    if "\n" in value:
+        value = value.splitlines()[0].strip()
+
+    if len(value) > 64:
+        acronym_match = re.search(r"\b[A-Za-z][A-Za-z0-9/&.\-\s]{1,40}\b", value)
+        if acronym_match:
+            value = acronym_match.group(0)
+
+    # Keep punctuation used in standard venue short names, e.g. "Empir. Softw. Eng.", "S&P".
+    value = re.sub(r"[^A-Za-z0-9/&.\-\s]", "", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    if not value:
+        return ""
+    return value[:48]
+
+
+def extract_venue_short_from_llm_content(content):
+    text = str(content or "").strip()
+    if not text:
+        return ""
+
+    # Allow model to return JSON, but also support plain token output.
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            payload = json.loads(text)
+            if isinstance(payload, dict):
+                return sanitize_venue_short_candidate(payload.get("venueShort", ""))
+        except Exception:
+            pass
+
+    return sanitize_venue_short_candidate(text)
+
+
+def extract_bibtex_entry_type(bibtex_text):
+    text = str(bibtex_text or "").strip()
+    if not text:
+        return ""
+    match = re.match(r"@\s*([A-Za-z]+)\s*\{", text)
+    if not match:
+        return ""
+    return match.group(1).strip().lower()
+
+
+def load_js_array_maybe_module_exports(file_path):
+    with open(file_path, "r", encoding="utf-8") as f:
+        content = f.read().strip()
+    prefix = "module.exports ="
+    if content.startswith(prefix):
+        content = content[len(prefix):].strip()
+    data = json.loads(content)
+    return data if isinstance(data, list) else []
+
+
+def load_reference_examples_from_js(file_path, max_examples=40):
+    if not file_path or not os.path.exists(file_path):
+        return []
+
+    try:
+        data = load_js_array_maybe_module_exports(file_path)
+    except Exception:
+        return []
+
+    counts = {}
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        venue = str(item.get("venue", "") or "").strip()
+        venue_short = str(item.get("venueShort", "") or "").strip()
+        if not venue or not venue_short:
+            continue
+        counter = counts.setdefault(venue, {})
+        counter[venue_short] = int(counter.get(venue_short, 0)) + 1
+
+    ranked = []
+    for venue, short_counter in counts.items():
+        sorted_shorts = sorted(short_counter.items(), key=lambda kv: (-kv[1], kv[0]))
+        top_short, top_count = sorted_shorts[0]
+        total = sum(short_counter.values())
+        ranked.append((venue, top_short, top_count, total))
+
+    ranked.sort(key=lambda t: (-t[2], -t[3], t[0]))
+    return [(venue, short) for venue, short, _, _ in ranked[:max_examples]]
+
+
+def get_venue_short_reference_examples(llm_config):
+    config = llm_config if isinstance(llm_config, dict) else {}
+    reference_path = str(config.get("reference_js_path", "") or "").strip()
+    if not reference_path:
+        return VENUE_SHORT_REFERENCE_EXAMPLES
+
+    try:
+        mtime = os.path.getmtime(reference_path)
+    except Exception:
+        return VENUE_SHORT_REFERENCE_EXAMPLES
+
+    cached = _VENUE_SHORT_REFERENCE_CACHE.get(reference_path)
+    if isinstance(cached, tuple) and len(cached) == 2 and cached[0] == mtime:
+        return cached[1]
+
+    examples = load_reference_examples_from_js(reference_path)
+    if not examples:
+        examples = VENUE_SHORT_REFERENCE_EXAMPLES
+    _VENUE_SHORT_REFERENCE_CACHE[reference_path] = (mtime, examples)
+    return examples
+
+
+def generate_venue_short_from_llm(venue_name, llm_config, bibtex_entry_type=""):
+    config = llm_config if isinstance(llm_config, dict) else {}
+    if not bool(config.get("enabled", False)):
+        return "", "llm_disabled"
+
+    base_url = str(config.get("base_url", "") or "").rstrip("/")
+    api_key = str(config.get("api_key", "") or "")
+    model = str(config.get("model", "") or "")
+    if not base_url or not api_key or not model:
+        return "", "llm_missing_config"
+
+    url = f"{base_url}/chat/completions"
+    entry_type = str(bibtex_entry_type or "").strip().lower()
+    if entry_type == "article":
+        type_instruction = "BibTeX starts with @article. Generate journal abbreviation as venueShort."
+    elif entry_type in {"inproceedings", "conference"}:
+        type_instruction = "BibTeX starts with @inproceedings. Generate conference abbreviation as venueShort."
+    else:
+        type_instruction = "BibTeX entry type is unknown. Generate the most standard academic venue abbreviation."
+
+    reference_examples = get_venue_short_reference_examples(config)
+    reference_text = "\n".join(
+        f"- {full} => {short}" for full, short in reference_examples
+    )
+
+    body = {
+        "model": model,
+        "temperature": float(config.get("temperature", 0.0) or 0.0),
+        "max_tokens": 16,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You generate canonical venueShort strings for academic venues. "
+                    "Always prefer community-standard abbreviations (not ad-hoc compressions). "
+                    "Learn abbreviation style from the following venue->venueShort pairs and follow their pattern. "
+                    "Match style of these references exactly, including punctuation/spaces when appropriate:\n"
+                    f"{reference_text}\n"
+                    "Return ONLY the venueShort string. No explanation. No JSON."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"{type_instruction}\n"
+                    f"BibTeX entry type (from beginning): @{entry_type or 'unknown'}\n"
+                    f"Venue: {venue_name}"
+                ),
+            },
+        ],
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+
+    try:
+        response = get_http_session().post(
+            url,
+            headers=headers,
+            json=body,
+            timeout=float(config.get("timeout_seconds", 20) or 20),
+        )
+        if response.status_code != 200:
+            return "", f"llm_http_{response.status_code}"
+
+        payload = response.json() if response.text else {}
+        choices = payload.get("choices", []) if isinstance(payload, dict) else []
+        if not choices or not isinstance(choices, list):
+            return "", "llm_invalid_response"
+
+        first_choice = choices[0] if isinstance(choices[0], dict) else {}
+        message = first_choice.get("message", {}) if isinstance(first_choice, dict) else {}
+        content = message.get("content", "") if isinstance(message, dict) else ""
+        venue_short = extract_venue_short_from_llm_content(content)
+        if not venue_short:
+            return "", "llm_empty_output"
+        return venue_short, ""
+    except Exception as exc:
+        return "", f"llm_exception:{exc}"
+
+
+def resolve_venue_short(venue_name, llm_config=None, bibtex_entry_type=""):
+    text = str(venue_name or "").strip()
+    if not text:
+        return {"venueShort": "", "source": "empty", "llmError": ""}
+
+    llm_short, llm_error = generate_venue_short_from_llm(text, llm_config, bibtex_entry_type=bibtex_entry_type)
+    if llm_short:
+        return {
+            "venueShort": llm_short,
+            "source": "llm",
+            "llmError": "",
+        }
+
+    return {
+        "venueShort": "",
+        "source": "llm",
+        "llmError": llm_error,
+    }
+
+
+def generate_venue_short_from_name(venue_name, llm_config=None, bibtex_entry_type=""):
+    result = resolve_venue_short(venue_name, llm_config=llm_config, bibtex_entry_type=bibtex_entry_type)
+    return str(result.get("venueShort", "") or "")
 
 
 def get_http_session():
@@ -653,11 +974,16 @@ def recover_missing_bibtex_fields(publications):
                     if year_text:
                         publication["date"] = year_text
 
-                venue, venue_short = extract_venue_from_bibtex(bibtex)
+                venue, _ = extract_venue_from_bibtex(bibtex)
                 if venue and not publication.get("venue"):
                     publication["venue"] = venue
-                if venue_short and not publication.get("venueShort"):
-                    publication["venueShort"] = venue_short
+                if publication.get("venue"):
+                    entry_type = extract_bibtex_entry_type(publication.get("bibtex", ""))
+                    publication["venueShort"] = generate_venue_short_from_name(
+                        publication.get("venue", ""),
+                        llm_config=VENUE_SHORT_LLM_CONFIG,
+                        bibtex_entry_type=entry_type,
+                    )
 
                 if not publication.get("paperUrl"):
                     bibtex_url = extract_url_from_bibtex(bibtex)
@@ -679,11 +1005,16 @@ def recover_missing_bibtex_fields(publications):
                 if year_text:
                     publication["date"] = year_text
 
-            venue, venue_short = extract_venue_from_bibtex(bibtex)
+            venue, _ = extract_venue_from_bibtex(bibtex)
             if venue and not publication.get("venue"):
                 publication["venue"] = venue
-            if venue_short and not publication.get("venueShort"):
-                publication["venueShort"] = venue_short
+            if publication.get("venue"):
+                entry_type = extract_bibtex_entry_type(publication.get("bibtex", ""))
+                publication["venueShort"] = generate_venue_short_from_name(
+                    publication.get("venue", ""),
+                    llm_config=VENUE_SHORT_LLM_CONFIG,
+                    bibtex_entry_type=entry_type,
+                )
 
             if not publication.get("paperUrl"):
                 bibtex_url = extract_url_from_bibtex(bibtex)
@@ -712,24 +1043,16 @@ def extract_venue_from_bibtex(bibtex_text):
 
     journal_match = re.search(r"journal\s*=\s*\{([^}]+)\}", bibtex_text, re.IGNORECASE)
     if journal_match:
-        venue_short = journal_match.group(1).replace("{", "").replace("}", "").strip()
+        # Keep original behavior for venue: do not overwrite venue using journal text.
+        # venueShort is generated by LLM later with BibTeX entry-type guidance.
         return venue, venue_short
 
     booktitle_match = re.search(r"booktitle\s*=\s*\{([\s\S]+?)\}\s*,", bibtex_text, re.IGNORECASE)
     if booktitle_match:
         raw_booktitle = re.sub(r"\s+", " ", booktitle_match.group(1)).strip()
-        short_match = re.search(r"\{\s*([A-Za-z][A-Za-z0-9/\-&]+)\s*\}\s*(?:'\d{2}|\d{4})", raw_booktitle)
-        if short_match:
-            venue_short = short_match.group(1).strip()
-        elif "{" in raw_booktitle and "}" in raw_booktitle:
-            brace_match = re.search(r"\{\s*([^}]+)\s*\}", raw_booktitle)
-            if brace_match:
-                venue_short = brace_match.group(1).strip()
         cleaned_booktitle = raw_booktitle.replace("{", "").replace("}", "")
         venue = cleaned_booktitle.split(",")[0].strip()
         venue = re.sub(r"^Proceedings of\s+", "", venue, flags=re.IGNORECASE).strip()
-        if venue_short:
-            venue_short = venue_short.replace("{", "").replace("}", "").strip()
 
     return venue, venue_short
 
@@ -1245,14 +1568,13 @@ def enrich_publication(publication, include_arxiv=False, start_date=""):
         )
         publication["bibtex"] = extract_bibtex_with_fallback(bibtex_view_url, prefer_fast=is_arxiv_candidate)
 
-    venue, venue_short = extract_venue_from_bibtex(publication.get("bibtex", ""))
+    venue, _ = extract_venue_from_bibtex(publication.get("bibtex", ""))
     if venue:
         publication["venue"] = venue
-    if venue_short:
-        publication["venueShort"] = venue_short
     is_arxiv_or_corr_entry = (
         is_arxiv_like_url(publication.get("paperUrl", ""))
         or is_arxiv_like_url(publication.get("arxivUrl", ""))
+        or str(publication.get("venue", "")).strip().lower() == "corr"
         or str(publication.get("venueShort", "")).strip().lower() == "corr"
     )
     if not publication.get("venue") and not is_arxiv_or_corr_entry:
@@ -1260,6 +1582,14 @@ def enrich_publication(publication, include_arxiv=False, start_date=""):
         issue_venue = extract_venue_from_dblp_issue_url(issue_url)
         if issue_venue:
             publication["venue"] = issue_venue
+
+    if publication.get("venue"):
+        entry_type = extract_bibtex_entry_type(publication.get("bibtex", ""))
+        publication["venueShort"] = generate_venue_short_from_name(
+            publication.get("venue", ""),
+            llm_config=VENUE_SHORT_LLM_CONFIG,
+            bibtex_entry_type=entry_type,
+        )
 
     if not paper_url:
         bibtex_url = extract_url_from_bibtex(publication.get("bibtex", ""))
@@ -1629,17 +1959,18 @@ def publication_dedup_key(publication):
 def merge_into_existing_js_file(existing_js_filepath, new_publications):
     existing_publications = load_js_array(existing_js_filepath)
 
-    merged_by_key = {}
-    ordered_keys = []
+    # Keep all existing entries exactly as they are (same content and order).
+    merged_data = list(existing_publications)
+    existing_keys = set()
+    existing_title_keys = set()
     for item in existing_publications:
         if not isinstance(item, dict):
             continue
         key = publication_dedup_key(item)
-        if key not in merged_by_key:
-            merged_by_key[key] = item
-            ordered_keys.append(key)
-        else:
-            merge_publication_items(merged_by_key[key], item)
+        existing_keys.add(key)
+        title_key = normalize_title_for_key(item.get("title", ""))
+        if title_key:
+            existing_title_keys.add(title_key)
 
     deduped_titles = []
     added_titles = []
@@ -1648,20 +1979,22 @@ def merge_into_existing_js_file(existing_js_filepath, new_publications):
             continue
         key = publication_dedup_key(item)
         title = (item.get("title", "") or "").strip() or "(untitled)"
-        if key in merged_by_key:
+        title_key = normalize_title_for_key(item.get("title", ""))
+        if key in existing_keys or (title_key and title_key in existing_title_keys):
             deduped_titles.append(title)
             continue
-        else:
-            merged_by_key[key] = item
-            ordered_keys.append(key)
-            added_titles.append(title)
 
-    merged_data = [merged_by_key[key] for key in ordered_keys]
-    for item in merged_data:
         if not isinstance(item.get("tags"), list):
             item["tags"] = []
         if not isinstance(item.get("awards"), list):
             item["awards"] = []
+
+        merged_data.append(item)
+        existing_keys.add(key)
+        if title_key:
+            existing_title_keys.add(title_key)
+        added_titles.append(title)
+
     save_to_js(merged_data, existing_js_filepath)
 
     print(f"Merged into existing JS file: added {len(added_titles)}, deduplicated {len(deduped_titles)}.")
@@ -1732,8 +2065,9 @@ def run_scrape_flow(
     fast_mode=False,
     dblp_request_interval_seconds=None,
     enable_metadata_cache=True,
+    venue_short_llm_config=None,
 ):
-    global MAX_WORKERS, PER_ITEM_SLEEP_SECONDS, DBLP_REQUEST_INTERVAL_SECONDS, ENABLE_METADATA_CACHE
+    global MAX_WORKERS, PER_ITEM_SLEEP_SECONDS, DBLP_REQUEST_INTERVAL_SECONDS, ENABLE_METADATA_CACHE, VENUE_SHORT_LLM_CONFIG
     global METADATA_REQUEST_TIMEOUT, METADATA_REQUEST_RETRIES, METADATA_RETRY_SLEEP_SECONDS
     if max_workers is not None:
         try:
@@ -1751,6 +2085,20 @@ def run_scrape_flow(
         except Exception:
             DBLP_REQUEST_INTERVAL_SECONDS = 4.0
     ENABLE_METADATA_CACHE = bool(enable_metadata_cache)
+    incoming_llm_config = venue_short_llm_config if isinstance(venue_short_llm_config, dict) else {}
+    # `load_run_config` already returns normalized keys: enabled/base_url/api_key/model...
+    # Avoid re-parsing that structure, otherwise config falls back to env vars and gets lost.
+    if {"enabled", "base_url", "api_key", "model"}.issubset(set(incoming_llm_config.keys())):
+        VENUE_SHORT_LLM_CONFIG = {
+            "enabled": bool(incoming_llm_config.get("enabled", False)),
+            "base_url": str(incoming_llm_config.get("base_url", "") or "").strip(),
+            "api_key": str(incoming_llm_config.get("api_key", "") or "").strip(),
+            "model": str(incoming_llm_config.get("model", "") or "").strip(),
+            "timeout_seconds": float(incoming_llm_config.get("timeout_seconds", 20) or 20),
+            "temperature": float(incoming_llm_config.get("temperature", 0) or 0),
+        }
+    else:
+        VENUE_SHORT_LLM_CONFIG = load_venue_short_llm_config(incoming_llm_config)
 
     if bool(fast_mode):
         METADATA_REQUEST_TIMEOUT = 5
@@ -1854,18 +2202,51 @@ def load_run_config(config_path):
         "fast_mode": bool(config_data.get("fast_mode", False)),
         "dblp_request_interval_seconds": config_data.get("dblp_request_interval_seconds", DBLP_REQUEST_INTERVAL_SECONDS),
         "enable_metadata_cache": bool(config_data.get("enable_metadata_cache", True)),
+        "venue_short_llm_config": load_venue_short_llm_config(config_data),
     }
 
 
 def main():
     parser = argparse.ArgumentParser(description="Scrape DBLP publications")
     parser.add_argument("--config", default=DEFAULT_CONFIG_FILENAME, help="Path to run config JSON")
+    parser.add_argument("--venue-short", default="", help="Generate venueShort for a single venue name and exit")
     args = parser.parse_args()
 
     project_root = os.path.dirname(os.path.abspath(__file__))
     config_path = args.config
     if not os.path.isabs(config_path):
         config_path = os.path.join(project_root, config_path)
+
+    llm_config = load_venue_short_llm_config({})
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as config_file:
+                raw_config = json.load(config_file)
+            if isinstance(raw_config, dict):
+                llm_config = load_venue_short_llm_config(raw_config)
+        except Exception as exc:
+            print(f"Warning: failed to load LLM config from config: {exc}")
+
+    if args.venue_short:
+        venue_input = str(args.venue_short or "").strip()
+        entry_type = extract_bibtex_entry_type(venue_input)
+        resolved = resolve_venue_short(
+            venue_input,
+            llm_config=llm_config,
+            bibtex_entry_type=entry_type,
+        )
+        output_payload = {
+            "venue": venue_input,
+            "venueShort": resolved.get("venueShort", ""),
+            "source": resolved.get("source", "llm"),
+            "mode": "llm",
+        }
+        if resolved.get("llmError"):
+            output_payload["llmError"] = resolved.get("llmError")
+        print(json.dumps({
+            **output_payload,
+        }, ensure_ascii=False, indent=2))
+        return
 
     try:
         run_config = load_run_config(config_path)
@@ -1886,6 +2267,7 @@ def main():
         fast_mode=run_config["fast_mode"],
         dblp_request_interval_seconds=run_config["dblp_request_interval_seconds"],
         enable_metadata_cache=run_config["enable_metadata_cache"],
+        venue_short_llm_config=run_config.get("venue_short_llm_config", {}),
     )
     if exit_code != 0:
         sys.exit(exit_code)

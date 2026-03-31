@@ -9,11 +9,20 @@
   "start_date": "2020",
 
   "_comment_4": "Absolute path to an existing .js file (must exist)",
-  "existing_js_path": "/Users/guoyiheng/selected-publications/collection/merged_collection(old).js",
+  "existing_js_path": "/Users/guoyiheng/selected-publications/collection/test.js",
 
   "_comment_5": "Fast mode: reduce metadata timeout/retries to avoid long stalls",
   "fast_mode": true,
 
   "_comment_6": "Use local metadata cache to speed up repeated runs",
-  "enable_metadata_cache": true
+  "enable_metadata_cache": true,
+
+  "_comment_7": "LLM-only venueShort mode (DeepSeek OpenAI-compatible API)",
+  "venue_short_llm_enabled": true,
+  "venue_short_llm_base_url": "https://api.deepseek.com/v1",
+  "venue_short_llm_api_key": "sk-5ecbca1428924643af452e8e1d3f4394",
+  "venue_short_llm_model": "deepseek-chat",
+  "venue_short_llm_timeout_seconds": 20,
+  "venue_short_llm_temperature": 0,
+  "venue_short_reference_js_path": "../collection/merged_collection(updateVenueShort&sorted).js"
 }
