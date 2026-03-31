@@ -11,6 +11,9 @@
   "_comment_4": "Absolute path to an existing .js file (must exist)",
   "existing_js_path": "/Users/guoyiheng/selected-publications/collection/test.js",
 
+  "_comment_4b": "Dedup reference directory: compare new items against all .js files in this folder",
+  "dedup_reference_dir": "../collection",
+
   "_comment_5": "Fast mode: reduce metadata timeout/retries to avoid long stalls",
   "fast_mode": true,
 
@@ -24,5 +27,15 @@
   "venue_short_llm_model": "deepseek-chat",
   "venue_short_llm_timeout_seconds": 20,
   "venue_short_llm_temperature": 0,
-  "venue_short_reference_js_path": "../collection/merged_collection(updateVenueShort&sorted).js"
+  "venue_short_reference_js_path": "../collection/merged_collection(updateVenueShort&sorted).js",
+
+  "_comment_8": "Tag guidance pool source (prefer single file to avoid scanning full collection)",
+  "tags_reference_collection_dir": "../collection",
+  "tags_reference_js_path": "../collection/merged_collection-old.js",
+  "tags_reference_max_count": 200,
+
+  "_comment_9": "Tag pool cache: avoid rescanning/parsing collection files every run",
+  "tags_reference_cache_enabled": true,
+  "tags_reference_cache_path": "./.tags_reference_cache.json",
+  "tags_reference_cache_force_refresh": false
 }

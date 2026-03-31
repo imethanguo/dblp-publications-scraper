@@ -4,13 +4,14 @@ from bs4 import BeautifulSoup
 import json
 import re
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import urljoin, urlparse
 import time
 import os
 import sys
 import signal
 import threading
+import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
@@ -45,6 +46,7 @@ _METADATA_CACHE_LOCK = threading.Lock()
 _METADATA_CACHE = {}
 _METADATA_CACHE_DIRTY = False
 _METADATA_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".metadata_cache.json")
+_TAGS_REFERENCE_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tags_reference_cache.json")
 VENUE_SHORT_LLM_CONFIG = {
     "enabled": False,
     "base_url": "",
@@ -53,6 +55,23 @@ VENUE_SHORT_LLM_CONFIG = {
     "timeout_seconds": 20,
     "temperature": 0,
     "reference_js_path": "",
+}
+
+TAGS_LLM_CONFIG = {
+    "enabled": False,
+    "base_url": "",
+    "api_key": "",
+    "model": "",
+    "timeout_seconds": 20,
+    "temperature": 0,
+}
+
+TAG_CANONICAL_MAP = {
+    "large language model": "LLM",
+    "large language models": "LLM",
+    "large-language model": "LLM",
+    "large-language models": "LLM",
+    "llms": "LLM",
 }
 
 VENUE_SHORT_REFERENCE_EXAMPLES = [
@@ -146,6 +165,156 @@ def load_venue_short_llm_config(raw_config):
     }
 
 
+def load_tags_llm_config(raw_config):
+    config_data = raw_config if isinstance(raw_config, dict) else {}
+
+    default_reference_collection_dir = os.path.normpath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "collection")
+    )
+
+    reference_collection_dir = str(
+        config_data.get(
+            "tags_reference_collection_dir",
+            config_data.get("reference_collection_dir", os.getenv("TAGS_REFERENCE_COLLECTION_DIR", default_reference_collection_dir)),
+        ) or ""
+    ).strip()
+    if reference_collection_dir and not os.path.isabs(reference_collection_dir):
+        reference_collection_dir = os.path.normpath(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), reference_collection_dir)
+        )
+
+    reference_js_path = str(
+        config_data.get(
+            "tags_reference_js_path",
+            config_data.get("reference_js_path", os.getenv("TAGS_REFERENCE_JS_PATH", "")),
+        ) or ""
+    ).strip()
+    if reference_js_path and not os.path.isabs(reference_js_path):
+        reference_js_path = os.path.normpath(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), reference_js_path)
+        )
+
+    max_reference_tags_raw = config_data.get(
+        "tags_reference_max_count",
+        config_data.get("max_reference_tags", os.getenv("TAGS_REFERENCE_MAX_COUNT", "200")),
+    )
+    try:
+        max_reference_tags = max(0, int(max_reference_tags_raw))
+    except Exception:
+        max_reference_tags = 200
+
+    reference_cache_enabled = parse_bool(
+        config_data.get(
+            "tags_reference_cache_enabled",
+            config_data.get("reference_cache_enabled", os.getenv("TAGS_REFERENCE_CACHE_ENABLED", "true")),
+        ),
+        default=True,
+    )
+
+    reference_cache_force_refresh = parse_bool(
+        config_data.get(
+            "tags_reference_cache_force_refresh",
+            config_data.get("reference_cache_force_refresh", os.getenv("TAGS_REFERENCE_CACHE_FORCE_REFRESH", "false")),
+        ),
+        default=False,
+    )
+
+    reference_cache_path = str(
+        config_data.get(
+            "tags_reference_cache_path",
+            config_data.get("reference_cache_path", os.getenv("TAGS_REFERENCE_CACHE_PATH", _TAGS_REFERENCE_CACHE_PATH)),
+        ) or ""
+    ).strip()
+    if reference_cache_path and not os.path.isabs(reference_cache_path):
+        reference_cache_path = os.path.normpath(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), reference_cache_path)
+        )
+
+    if {"enabled", "base_url", "api_key", "model"}.issubset(set(config_data.keys())):
+        try:
+            timeout_seconds = max(1.0, float(config_data.get("timeout_seconds", 20) or 20))
+        except Exception:
+            timeout_seconds = 20.0
+        try:
+            temperature = min(1.0, max(0.0, float(config_data.get("temperature", 0) or 0)))
+        except Exception:
+            temperature = 0.0
+        return {
+            "enabled": bool(config_data.get("enabled", False)),
+            "base_url": str(config_data.get("base_url", "") or "").strip(),
+            "api_key": str(config_data.get("api_key", "") or "").strip(),
+            "model": str(config_data.get("model", "") or "").strip(),
+            "timeout_seconds": timeout_seconds,
+            "temperature": temperature,
+            "reference_collection_dir": reference_collection_dir,
+            "reference_js_path": reference_js_path,
+            "max_reference_tags": max_reference_tags,
+            "reference_cache_enabled": bool(reference_cache_enabled),
+            "reference_cache_path": reference_cache_path,
+            "reference_cache_force_refresh": bool(reference_cache_force_refresh),
+        }
+
+    enabled = parse_bool(
+        config_data.get(
+            "tags_llm_enabled",
+            config_data.get("venue_short_llm_enabled", os.getenv("TAGS_LLM_ENABLED", os.getenv("VENUE_SHORT_LLM_ENABLED", "false"))),
+        ),
+        default=False,
+    )
+    base_url = str(
+        config_data.get(
+            "tags_llm_base_url",
+            config_data.get("venue_short_llm_base_url", os.getenv("TAGS_LLM_BASE_URL", os.getenv("VENUE_SHORT_LLM_BASE_URL", ""))),
+        ) or ""
+    ).strip()
+    api_key = str(
+        config_data.get(
+            "tags_llm_api_key",
+            config_data.get("venue_short_llm_api_key", os.getenv("TAGS_LLM_API_KEY", os.getenv("VENUE_SHORT_LLM_API_KEY", ""))),
+        ) or ""
+    ).strip()
+    model = str(
+        config_data.get(
+            "tags_llm_model",
+            config_data.get("venue_short_llm_model", os.getenv("TAGS_LLM_MODEL", os.getenv("VENUE_SHORT_LLM_MODEL", ""))),
+        ) or ""
+    ).strip()
+
+    timeout_raw = config_data.get(
+        "tags_llm_timeout_seconds",
+        config_data.get("venue_short_llm_timeout_seconds", os.getenv("TAGS_LLM_TIMEOUT_SECONDS", os.getenv("VENUE_SHORT_LLM_TIMEOUT_SECONDS", "20"))),
+    )
+    temperature_raw = config_data.get(
+        "tags_llm_temperature",
+        config_data.get("venue_short_llm_temperature", os.getenv("TAGS_LLM_TEMPERATURE", os.getenv("VENUE_SHORT_LLM_TEMPERATURE", "0"))),
+    )
+
+    try:
+        timeout_seconds = max(1.0, float(timeout_raw))
+    except Exception:
+        timeout_seconds = 20.0
+
+    try:
+        temperature = min(1.0, max(0.0, float(temperature_raw)))
+    except Exception:
+        temperature = 0.0
+
+    return {
+        "enabled": bool(enabled),
+        "base_url": base_url,
+        "api_key": api_key,
+        "model": model,
+        "timeout_seconds": timeout_seconds,
+        "temperature": temperature,
+        "reference_collection_dir": reference_collection_dir,
+        "reference_js_path": reference_js_path,
+        "max_reference_tags": max_reference_tags,
+        "reference_cache_enabled": bool(reference_cache_enabled),
+        "reference_cache_path": reference_cache_path,
+        "reference_cache_force_refresh": bool(reference_cache_force_refresh),
+    }
+
+
 def sanitize_venue_short_candidate(text):
     value = str(text or "").strip()
     if not value:
@@ -186,6 +355,85 @@ def extract_venue_short_from_llm_content(content):
             pass
 
     return sanitize_venue_short_candidate(text)
+
+
+def sanitize_tag_candidate(text):
+    value = str(text or "").strip()
+    if not value:
+        return ""
+
+    value = value.strip().strip("`\"'")
+    if not value:
+        return ""
+
+    value = re.sub(r"^\s*[-*\d.\)\s]+", "", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    value = value.strip(".,;:")
+    if not value:
+        return ""
+
+    canonical = TAG_CANONICAL_MAP.get(value.lower())
+    if canonical:
+        return canonical
+
+    return value
+
+
+def extract_tags_from_llm_content(content):
+    text = str(content or "").strip()
+    if not text:
+        return []
+
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+
+    try:
+        payload = json.loads(text)
+        if isinstance(payload, list):
+            result = []
+            seen = set()
+            for item in payload:
+                candidate = sanitize_tag_candidate(item)
+                if not candidate:
+                    continue
+                key = candidate.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                result.append(candidate)
+            return result[:4]
+        if isinstance(payload, dict):
+            nested = payload.get("tags", [])
+            if isinstance(nested, list):
+                result = []
+                seen = set()
+                for item in nested:
+                    candidate = sanitize_tag_candidate(item)
+                    if not candidate:
+                        continue
+                    key = candidate.lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    result.append(candidate)
+                return result[:4]
+    except Exception:
+        pass
+
+    parts = re.split(r"[\n,;|]+", text)
+    result = []
+    seen = set()
+    for part in parts:
+        candidate = sanitize_tag_candidate(part)
+        if not candidate:
+            continue
+        key = candidate.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(candidate)
+    return result[:4]
 
 
 def extract_bibtex_entry_type(bibtex_text):
@@ -366,6 +614,94 @@ def resolve_venue_short(venue_name, llm_config=None, bibtex_entry_type=""):
 def generate_venue_short_from_name(venue_name, llm_config=None, bibtex_entry_type=""):
     result = resolve_venue_short(venue_name, llm_config=llm_config, bibtex_entry_type=bibtex_entry_type)
     return str(result.get("venueShort", "") or "")
+
+
+def generate_tags_from_abstract(abstract_text, llm_config=None):
+    config = llm_config if isinstance(llm_config, dict) else {}
+    if not bool(config.get("enabled", False)):
+        return [], "llm_disabled"
+
+    base_url = str(config.get("base_url", "") or "").rstrip("/")
+    api_key = str(config.get("api_key", "") or "")
+    model = str(config.get("model", "") or "")
+    if not base_url or not api_key or not model:
+        return [], "llm_missing_config"
+
+    abstract = str(abstract_text or "").strip()
+    if not abstract:
+        return [], "empty_abstract"
+
+    reference_tags = config.get("reference_tags", []) if isinstance(config.get("reference_tags", []), list) else []
+    normalized_reference_tags = normalize_tag_list(reference_tags)
+    reference_tags_text = ""
+    if normalized_reference_tags:
+        reference_tags_text = "\\n".join(f"- {tag}" for tag in normalized_reference_tags)
+
+    url = f"{base_url}/chat/completions"
+    body = {
+        "model": model,
+        "temperature": float(config.get("temperature", 0.0) or 0.0),
+        "max_tokens": 96,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You generate topical tags for academic publication abstracts. "
+                    "Infer concise, high-signal tags from the abstract only. "
+                    "Use 3-4 tags, each a concise noun phrase in title case, similar to repository tags such as Android, Blockchain, Program Analysis, Deep Learning, Unit Test, Empirical Study, Regular expression. Prefer shorter tags when clarity is not lost. "
+                    "You will be given a preferred tag vocabulary from this repository. Prefer reusing these tags when semantically appropriate. "
+                    "If none of the preferred tags fit the abstract, generate new tags. "
+                    "Prefer broad but meaningful concepts; avoid venue names, author names, generic words like paper/study/approach/method unless they are truly the core topic. "
+                    "Return ONLY a JSON array of strings, with no markdown, no explanation, and no extra keys."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Preferred Tag Vocabulary (reuse first if suitable):\\n{reference_tags_text or '(none)'}\\n\\n"
+                    f"Abstract:\\n{abstract}"
+                ),
+            },
+        ],
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+
+    try:
+        response = get_http_session().post(
+            url,
+            headers=headers,
+            json=body,
+            timeout=float(config.get("timeout_seconds", 20) or 20),
+        )
+        if response.status_code != 200:
+            return [], f"llm_http_{response.status_code}"
+
+        payload = response.json() if response.text else {}
+        choices = payload.get("choices", []) if isinstance(payload, dict) else []
+        if not choices or not isinstance(choices, list):
+            return [], "llm_invalid_response"
+
+        first_choice = choices[0] if isinstance(choices[0], dict) else {}
+        message = first_choice.get("message", {}) if isinstance(first_choice, dict) else {}
+        content = message.get("content", "") if isinstance(message, dict) else ""
+        tags = extract_tags_from_llm_content(content)
+        if not tags:
+            return [], "llm_empty_output"
+        return tags, ""
+    except Exception as exc:
+        return [], f"llm_exception:{exc}"
+
+
+def resolve_tags_from_abstract(abstract_text, llm_config=None):
+    tags, error = generate_tags_from_abstract(abstract_text, llm_config=llm_config)
+    return {
+        "tags": tags,
+        "source": "llm" if tags else "llm",
+        "llmError": error,
+    }
 
 
 def get_http_session():
@@ -1903,6 +2239,181 @@ def merge_publication_items(existing_item, incoming_item):
         existing_item["arxivUrl"] = paper_url
 
 
+def normalize_tag_list(raw_tags):
+    normalized = []
+    seen = set()
+    for item in raw_tags or []:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(text)
+    return normalized
+
+
+def load_tag_pool_from_collection(collection_dir, max_count=200):
+    if not collection_dir or not os.path.isdir(collection_dir):
+        return []
+
+    merged = []
+    seen = set()
+
+    for root, _, files in os.walk(collection_dir):
+        for name in files:
+            ext = os.path.splitext(name)[1].lower()
+            if ext not in {".js", ".json"}:
+                continue
+            path = os.path.join(root, name)
+            try:
+                data = load_js_array(path)
+            except Exception:
+                continue
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                tags = normalize_tag_list(item.get("tags", []))
+                for tag in tags:
+                    key = tag.lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    merged.append(tag)
+                    if max_count and len(merged) >= max_count:
+                        return merged
+    return merged
+
+
+def load_tag_pool_from_file(reference_file_path, max_count=200):
+    if not reference_file_path or not os.path.isfile(reference_file_path):
+        return []
+    ext = os.path.splitext(reference_file_path)[1].lower()
+    if ext not in {".js", ".json"}:
+        return []
+
+    try:
+        data = load_js_array(reference_file_path)
+    except Exception:
+        return []
+
+    merged = []
+    seen = set()
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        tags = normalize_tag_list(item.get("tags", []))
+        for tag in tags:
+            key = tag.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(tag)
+            if max_count and len(merged) >= max_count:
+                return merged
+    return merged
+
+
+def build_collection_file_signature(collection_dir):
+    if not collection_dir or not os.path.isdir(collection_dir):
+        return ""
+
+    rows = []
+    for root, _, files in os.walk(collection_dir):
+        for name in files:
+            ext = os.path.splitext(name)[1].lower()
+            if ext not in {".js", ".json"}:
+                continue
+            path = os.path.join(root, name)
+            try:
+                stat = os.stat(path)
+            except Exception:
+                continue
+            rel = os.path.relpath(path, collection_dir).replace("\\", "/")
+            rows.append(f"{rel}|{int(stat.st_mtime_ns)}|{int(stat.st_size)}")
+
+    if not rows:
+        return ""
+
+    rows.sort()
+    digest = hashlib.sha256("\n".join(rows).encode("utf-8", errors="ignore")).hexdigest()
+    return digest
+
+
+def build_single_file_signature(reference_file_path):
+    if not reference_file_path or not os.path.isfile(reference_file_path):
+        return ""
+    try:
+        stat = os.stat(reference_file_path)
+    except Exception:
+        return ""
+    text = f"{os.path.normpath(reference_file_path)}|{int(stat.st_mtime_ns)}|{int(stat.st_size)}"
+    return hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def load_tag_pool_with_cache(collection_dir, reference_file_path="", max_count=200, cache_path="", cache_enabled=True, force_refresh=False):
+    normalized_cache_path = str(cache_path or "").strip() or _TAGS_REFERENCE_CACHE_PATH
+
+    source_mode = "file" if reference_file_path else "collection"
+    normalized_source = ""
+    if source_mode == "file":
+        if not reference_file_path or not os.path.isfile(reference_file_path):
+            return [], "no_reference_file"
+        signature = build_single_file_signature(reference_file_path)
+        normalized_source = os.path.normpath(reference_file_path)
+    else:
+        if not collection_dir or not os.path.isdir(collection_dir):
+            return [], "no_collection_dir"
+        signature = build_collection_file_signature(collection_dir)
+        normalized_source = os.path.normpath(collection_dir)
+
+    if not signature:
+        return [], "empty_source"
+
+    if cache_enabled and not force_refresh and os.path.exists(normalized_cache_path):
+        try:
+            with open(normalized_cache_path, "r", encoding="utf-8") as f:
+                cached = json.load(f)
+            if isinstance(cached, dict):
+                cached_signature = str(cached.get("signature", "") or "")
+                cached_source_mode = str(cached.get("source_mode", "collection") or "collection")
+                cached_source_path = str(cached.get("source_path", "") or "")
+                cached_max_count = int(cached.get("max_count", 0) or 0)
+                cached_tags = cached.get("tags", []) if isinstance(cached.get("tags", []), list) else []
+                if (
+                    cached_signature == signature
+                    and cached_source_mode == source_mode
+                    and os.path.normpath(cached_source_path) == normalized_source
+                    and cached_max_count == int(max_count)
+                ):
+                    return normalize_tag_list(cached_tags), "cache_hit"
+        except Exception:
+            pass
+
+    if source_mode == "file":
+        tags = load_tag_pool_from_file(reference_file_path, max_count=max_count)
+    else:
+        tags = load_tag_pool_from_collection(collection_dir, max_count=max_count)
+
+    if cache_enabled:
+        payload = {
+            "source_mode": source_mode,
+            "source_path": normalized_source,
+            "max_count": int(max_count),
+            "signature": signature,
+            "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "tags": tags,
+        }
+        try:
+            with open(normalized_cache_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    return tags, "cache_refresh"
+
+
 def normalize_title_for_key(title):
     text = (title or "").strip().lower()
     text = re.sub(r"[^\w\s]", "", text)
@@ -1956,21 +2467,51 @@ def publication_dedup_key(publication):
     return f"raw:{raw}"
 
 
-def merge_into_existing_js_file(existing_js_filepath, new_publications):
+def build_dedup_index_from_js_files(reference_dir):
+    dedup_keys = set()
+    dedup_title_keys = set()
+
+    if not reference_dir or not os.path.isdir(reference_dir):
+        return dedup_keys, dedup_title_keys
+
+    for root, _, files in os.walk(reference_dir):
+        for filename in files:
+            if not filename.lower().endswith(".js"):
+                continue
+            file_path = os.path.join(root, filename)
+            try:
+                publications = load_js_array(file_path)
+            except Exception:
+                continue
+
+            for item in publications:
+                if not isinstance(item, dict):
+                    continue
+                dedup_keys.add(publication_dedup_key(item))
+                title_key = normalize_title_for_key(item.get("title", ""))
+                if title_key:
+                    dedup_title_keys.add(title_key)
+
+    return dedup_keys, dedup_title_keys
+
+
+def merge_into_existing_js_file(existing_js_filepath, new_publications, dedup_reference_dir=""):
     existing_publications = load_js_array(existing_js_filepath)
 
     # Keep all existing entries exactly as they are (same content and order).
     merged_data = list(existing_publications)
-    existing_keys = set()
-    existing_title_keys = set()
-    for item in existing_publications:
-        if not isinstance(item, dict):
-            continue
-        key = publication_dedup_key(item)
-        existing_keys.add(key)
-        title_key = normalize_title_for_key(item.get("title", ""))
-        if title_key:
-            existing_title_keys.add(title_key)
+    existing_keys, existing_title_keys = build_dedup_index_from_js_files(dedup_reference_dir)
+
+    # Fallback for backwards compatibility when reference dir is unavailable.
+    if not existing_keys and not existing_title_keys:
+        for item in existing_publications:
+            if not isinstance(item, dict):
+                continue
+            key = publication_dedup_key(item)
+            existing_keys.add(key)
+            title_key = normalize_title_for_key(item.get("title", ""))
+            if title_key:
+                existing_title_keys.add(title_key)
 
     deduped_titles = []
     added_titles = []
@@ -2038,20 +2579,27 @@ def format_publications(publications, include_arxiv=False, start_date=""):
             "venue": normalized_venue,
             "venueShort": normalized_venue_short,
             "abstract": pub.get("abstract", ""),
+            "tags": [],
             "arxivUrl": pub.get("arxivUrl", ""),
             "paperUrl": pub.get("paperUrl", ""),
             "bibtex": pub.get("bibtex", "")
         }
 
-        title_key = (item.get("title", "") or "").strip().lower()
-        if not title_key:
-            title_key = f"__untitled__{len(title_order)}"
+        abstract_text = str(item.get("abstract", "") or "").strip()
+        if abstract_text:
+            tag_resolution = resolve_tags_from_abstract(abstract_text, llm_config=TAGS_LLM_CONFIG)
+            resolved_tags = tag_resolution.get("tags", []) if isinstance(tag_resolution.get("tags", []), list) else []
+            item["tags"] = normalize_tag_list(resolved_tags)[:4]
 
-        if title_key not in merged_by_title:
-            merged_by_title[title_key] = item
-            title_order.append(title_key)
+        item_title_key = (item.get("title", "") or "").strip().lower()
+        if not item_title_key:
+            item_title_key = f"__untitled__{len(title_order)}"
+
+        if item_title_key not in merged_by_title:
+            merged_by_title[item_title_key] = item
+            title_order.append(item_title_key)
         else:
-            merge_publication_items(merged_by_title[title_key], item)
+            merge_publication_items(merged_by_title[item_title_key], item)
 
     return [merged_by_title[key] for key in title_order]
 
@@ -2066,9 +2614,15 @@ def run_scrape_flow(
     dblp_request_interval_seconds=None,
     enable_metadata_cache=True,
     venue_short_llm_config=None,
+    tags_llm_config=None,
+    dedup_reference_dir="",
 ):
-    global MAX_WORKERS, PER_ITEM_SLEEP_SECONDS, DBLP_REQUEST_INTERVAL_SECONDS, ENABLE_METADATA_CACHE, VENUE_SHORT_LLM_CONFIG
+    global MAX_WORKERS, PER_ITEM_SLEEP_SECONDS, DBLP_REQUEST_INTERVAL_SECONDS, ENABLE_METADATA_CACHE, VENUE_SHORT_LLM_CONFIG, TAGS_LLM_CONFIG
     global METADATA_REQUEST_TIMEOUT, METADATA_REQUEST_RETRIES, METADATA_RETRY_SLEEP_SECONDS
+
+    incoming_llm_config = venue_short_llm_config if isinstance(venue_short_llm_config, dict) else {}
+    incoming_tags_llm_config = tags_llm_config if isinstance(tags_llm_config, dict) else {}
+
     if max_workers is not None:
         try:
             MAX_WORKERS = max(1, int(max_workers))
@@ -2084,8 +2638,9 @@ def run_scrape_flow(
             DBLP_REQUEST_INTERVAL_SECONDS = max(0.0, float(dblp_request_interval_seconds))
         except Exception:
             DBLP_REQUEST_INTERVAL_SECONDS = 4.0
+
     ENABLE_METADATA_CACHE = bool(enable_metadata_cache)
-    incoming_llm_config = venue_short_llm_config if isinstance(venue_short_llm_config, dict) else {}
+
     # `load_run_config` already returns normalized keys: enabled/base_url/api_key/model...
     # Avoid re-parsing that structure, otherwise config falls back to env vars and gets lost.
     if {"enabled", "base_url", "api_key", "model"}.issubset(set(incoming_llm_config.keys())):
@@ -2096,9 +2651,12 @@ def run_scrape_flow(
             "model": str(incoming_llm_config.get("model", "") or "").strip(),
             "timeout_seconds": float(incoming_llm_config.get("timeout_seconds", 20) or 20),
             "temperature": float(incoming_llm_config.get("temperature", 0) or 0),
+            "reference_js_path": str(incoming_llm_config.get("reference_js_path", "") or "").strip(),
         }
     else:
         VENUE_SHORT_LLM_CONFIG = load_venue_short_llm_config(incoming_llm_config)
+
+    TAGS_LLM_CONFIG = load_tags_llm_config(incoming_tags_llm_config)
 
     if bool(fast_mode):
         METADATA_REQUEST_TIMEOUT = 5
@@ -2128,6 +2686,50 @@ def run_scrape_flow(
     author_name = extract_author_name_from_dblp(url)
     if not author_name:
         print("Warning: Could not extract author name from URL. Continue scraping.")
+
+    js_filepath = (existing_js_path or "").strip()
+    if not js_filepath:
+        print("Error: existing_js_path is required.")
+        return 1
+    if not os.path.exists(js_filepath):
+        print(f"Error: Selected JS file does not exist: {js_filepath}")
+        return 1
+
+    configured_dedup_reference_dir = str(dedup_reference_dir or "").strip()
+    if configured_dedup_reference_dir and not os.path.isabs(configured_dedup_reference_dir):
+        configured_dedup_reference_dir = os.path.normpath(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), configured_dedup_reference_dir)
+        )
+    if not configured_dedup_reference_dir:
+        configured_dedup_reference_dir = os.path.dirname(os.path.abspath(js_filepath))
+
+    tag_collection_dir = str(TAGS_LLM_CONFIG.get("reference_collection_dir", "") or "").strip()
+    tag_reference_js_path = str(TAGS_LLM_CONFIG.get("reference_js_path", "") or "").strip()
+    try:
+        max_reference_tags = max(0, int(TAGS_LLM_CONFIG.get("max_reference_tags", 200) or 200))
+    except Exception:
+        max_reference_tags = 200
+    reference_cache_enabled = bool(TAGS_LLM_CONFIG.get("reference_cache_enabled", True))
+    reference_cache_force_refresh = bool(TAGS_LLM_CONFIG.get("reference_cache_force_refresh", False))
+    reference_cache_path = str(TAGS_LLM_CONFIG.get("reference_cache_path", "") or "").strip()
+
+    reference_tags, reference_tags_cache_status = load_tag_pool_with_cache(
+        tag_collection_dir,
+        reference_file_path=tag_reference_js_path,
+        max_count=max_reference_tags,
+        cache_path=reference_cache_path,
+        cache_enabled=reference_cache_enabled,
+        force_refresh=reference_cache_force_refresh,
+    )
+    TAGS_LLM_CONFIG["reference_tags"] = reference_tags
+    if reference_tags:
+        print(
+            f"Loaded {len(reference_tags)} reference tags for LLM guidance "
+            f"(status={reference_tags_cache_status}, cache={reference_cache_path or _TAGS_REFERENCE_CACHE_PATH})."
+        )
+    else:
+        print("Warning: No reference tags loaded from collection. LLM will generate tags without tag-pool guidance.")
+
     try:
         load_metadata_cache(_METADATA_CACHE_PATH)
         publications, bibtex_view_urls = scrape_dblp_publications(
@@ -2156,14 +2758,11 @@ def run_scrape_flow(
             print(f"{index}. {title}")
             print(f"   content: {found_text}")
 
-        js_filepath = (existing_js_path or "").strip()
-        if not js_filepath:
-            print("Error: existing_js_path is required.")
-            return 1
-        if not os.path.exists(js_filepath):
-            print(f"Error: Selected JS file does not exist: {js_filepath}")
-            return 1
-        merge_into_existing_js_file(js_filepath, formatted_publications)
+        merge_into_existing_js_file(
+            js_filepath,
+            formatted_publications,
+            dedup_reference_dir=configured_dedup_reference_dir,
+        )
         print(f"Publications saved to existing file: {js_filepath}")
         save_metadata_cache(_METADATA_CACHE_PATH)
         return 0
@@ -2202,7 +2801,9 @@ def load_run_config(config_path):
         "fast_mode": bool(config_data.get("fast_mode", False)),
         "dblp_request_interval_seconds": config_data.get("dblp_request_interval_seconds", DBLP_REQUEST_INTERVAL_SECONDS),
         "enable_metadata_cache": bool(config_data.get("enable_metadata_cache", True)),
+        "dedup_reference_dir": str(config_data.get("dedup_reference_dir", "") or "").strip(),
         "venue_short_llm_config": load_venue_short_llm_config(config_data),
+        "tags_llm_config": load_tags_llm_config(config_data),
     }
 
 
@@ -2268,6 +2869,8 @@ def main():
         dblp_request_interval_seconds=run_config["dblp_request_interval_seconds"],
         enable_metadata_cache=run_config["enable_metadata_cache"],
         venue_short_llm_config=run_config.get("venue_short_llm_config", {}),
+        tags_llm_config=run_config.get("tags_llm_config", {}),
+        dedup_reference_dir=run_config.get("dedup_reference_dir", ""),
     )
     if exit_code != 0:
         sys.exit(exit_code)
