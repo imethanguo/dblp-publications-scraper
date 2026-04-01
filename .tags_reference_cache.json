@@ -1,9 +1,9 @@
 {
-  "source_mode": "file",
-  "source_path": "/Users/guoyiheng/selected-publications/collection/merged_collection-old.js",
-  "max_count": 200,
-  "signature": "247f208f856ce6f100e8a64a1fc979ba1adfa012bab03f8db8a75897361d35ab",
-  "updated_at": "2026-03-31T09:52:49.823661Z",
+  "source_mode": "collection",
+  "source_path": "/Users/guoyiheng/selected-publications/collection",
+  "max_count": 64,
+  "signature": "d17c953a8db79100d1e1bb24fd8d6be3e60d5400332fd81dc17d6ab44f12bc7b",
+  "updated_at": "2026-04-01T02:07:03.512Z",
   "tags": [
     "Meramorphic Testing",
     "LLM",

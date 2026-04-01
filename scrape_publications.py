@@ -77,8 +77,8 @@ TAG_CANONICAL_MAP = {
 VENUE_SHORT_REFERENCE_EXAMPLES = [
     ("ACM Transactions on Software Engineering and Methodology", "TOSEM"),
     ("IEEE Transactions on Software Engineering", "TSE"),
-    ("Empirical Software Engineering", "Empir. Softw. Eng."),
-    ("Automated Software Engineering", "Autom. Softw. Eng."),
+    ("Empirical Software Engineering", "ESE"),
+    ("Automated Software Engineering", "ASE"),
     ("Proceedings of the ACM on Software Engineering", "FSE"),
     ("International Conference on Software Engineering", "ICSE"),
     ("IEEE/ACM International Conference on Automated Software Engineering", "ASE"),
@@ -116,10 +116,7 @@ def parse_bool(value, default=False):
 def load_venue_short_llm_config(raw_config):
     config_data = raw_config if isinstance(raw_config, dict) else {}
 
-    enabled = parse_bool(
-        config_data.get("venue_short_llm_enabled", os.getenv("VENUE_SHORT_LLM_ENABLED", "false")),
-        default=False,
-    )
+    enabled = True
     base_url = str(
         config_data.get("venue_short_llm_base_url", os.getenv("VENUE_SHORT_LLM_BASE_URL", "")) or ""
     ).strip()
@@ -203,13 +200,7 @@ def load_tags_llm_config(raw_config):
     except Exception:
         max_reference_tags = 200
 
-    reference_cache_enabled = parse_bool(
-        config_data.get(
-            "tags_reference_cache_enabled",
-            config_data.get("reference_cache_enabled", os.getenv("TAGS_REFERENCE_CACHE_ENABLED", "true")),
-        ),
-        default=True,
-    )
+    reference_cache_enabled = True
 
     reference_cache_force_refresh = parse_bool(
         config_data.get(
@@ -240,7 +231,7 @@ def load_tags_llm_config(raw_config):
         except Exception:
             temperature = 0.0
         return {
-            "enabled": bool(config_data.get("enabled", False)),
+            "enabled": True,
             "base_url": str(config_data.get("base_url", "") or "").strip(),
             "api_key": str(config_data.get("api_key", "") or "").strip(),
             "model": str(config_data.get("model", "") or "").strip(),
@@ -254,13 +245,7 @@ def load_tags_llm_config(raw_config):
             "reference_cache_force_refresh": bool(reference_cache_force_refresh),
         }
 
-    enabled = parse_bool(
-        config_data.get(
-            "tags_llm_enabled",
-            config_data.get("venue_short_llm_enabled", os.getenv("TAGS_LLM_ENABLED", os.getenv("VENUE_SHORT_LLM_ENABLED", "false"))),
-        ),
-        default=False,
-    )
+    enabled = True
     base_url = str(
         config_data.get(
             "tags_llm_base_url",
@@ -544,6 +529,12 @@ def generate_venue_short_from_llm(venue_name, llm_config, bibtex_entry_type=""):
                 "content": (
                     "You generate canonical venueShort strings for academic venues. "
                     "Always prefer community-standard abbreviations (not ad-hoc compressions). "
+                    "When multiple valid abbreviations exist, choose the SHORTEST widely-used form. "
+                    "If venue exactly equals 'Automated Software Engineering', return ASE. "
+                    "For example: Empirical Software Engineering -> ESE (not Empir. Softw. Eng.); "
+                    "Automated Software Engineering -> ASE (prefer shortest standard form); "
+                    "International Conference on Software Engineering -> ICSE; "
+                    "IEEE Transactions on Software Engineering -> TSE. "
                     "Learn abbreviation style from the following venue->venueShort pairs and follow their pattern. "
                     "Match style of these references exactly, including punctuation/spaces when appropriate:\n"
                     f"{reference_text}\n"
@@ -1242,7 +1233,7 @@ def extract_bibtex_with_fallback(bibtex_view_url, prefer_fast=False):
     )
 
 
-def recover_missing_bibtex_fields(publications):
+def recover_missing_bibtex_fields(publications, progress_callback=None):
     candidates = []
     for publication in publications:
         if publication.get("skip"):
@@ -1253,6 +1244,11 @@ def recover_missing_bibtex_fields(publications):
             candidates.append(publication)
 
     if not candidates:
+        if callable(progress_callback):
+            try:
+                progress_callback(0, 0, 0)
+            except Exception:
+                pass
         return 0
 
     def _recover_single(publication):
@@ -1286,6 +1282,22 @@ def recover_missing_bibtex_fields(publications):
         return ""
 
     recovered = 0
+    processed = 0
+    total_candidates = len(candidates)
+    if callable(progress_callback):
+        try:
+            progress_callback(0, total_candidates, recovered)
+        except Exception:
+            pass
+
+    def _emit_progress():
+        if not callable(progress_callback):
+            return
+        try:
+            progress_callback(processed, total_candidates, recovered)
+        except Exception:
+            pass
+
     workers = max(1, min(int(MAX_WORKERS or 1), 8))
     if workers > 1 and len(candidates) > 1:
         with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -1299,7 +1311,9 @@ def recover_missing_bibtex_fields(publications):
                     bibtex = future.result()
                 except Exception:
                     bibtex = ""
+                processed += 1
                 if not bibtex:
+                    _emit_progress()
                     continue
 
                 publication["bibtex"] = bibtex
@@ -1327,10 +1341,13 @@ def recover_missing_bibtex_fields(publications):
                         publication["paperUrl"] = bibtex_url
                         if is_arxiv_like_url(bibtex_url) and not publication.get("arxivUrl"):
                             publication["arxivUrl"] = bibtex_url
+                _emit_progress()
     else:
         for publication in candidates:
             bibtex = _recover_single(publication)
+            processed += 1
             if not bibtex:
+                _emit_progress()
                 continue
 
             publication["bibtex"] = bibtex
@@ -1358,6 +1375,9 @@ def recover_missing_bibtex_fields(publications):
                     publication["paperUrl"] = bibtex_url
                     if is_arxiv_like_url(bibtex_url) and not publication.get("arxivUrl"):
                         publication["arxivUrl"] = bibtex_url
+            _emit_progress()
+
+    _emit_progress()
 
     return recovered
 
@@ -1523,15 +1543,151 @@ def fetch_metadata_from_openalex(paper_url):
     return metadata
 
 
+def extract_pii_from_url(url):
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    match = re.search(r"/pii/([A-Z0-9]+)", text, re.IGNORECASE)
+    if match:
+        return match.group(1).upper()
+    return ""
+
+
+def extract_elsevier_redirect_target(page_text):
+    text = str(page_text or "")
+    if not text:
+        return ""
+    redirect_match = re.search(r'name="redirectURL"\s+value="([^"]+)"', text, re.IGNORECASE)
+    if not redirect_match:
+        return ""
+    try:
+        from urllib.parse import unquote
+        return unquote(redirect_match.group(1).strip())
+    except Exception:
+        return ""
+
+
+def fetch_metadata_from_elsevier_pii(pii):
+    metadata = {"abstract": "", "date": "", "tags": []}
+    value = str(pii or "").strip().upper()
+    if not value:
+        return metadata
+
+    endpoint = f"https://api.elsevier.com/content/article/pii/{value}?httpAccept=application/json"
+    try:
+        response = get_http_session().get(endpoint, timeout=METADATA_REQUEST_TIMEOUT, headers=REQUEST_HEADERS)
+        if response.status_code != 200 or not response.text:
+            return metadata
+
+        payload = response.json() if response.text else {}
+        if not isinstance(payload, dict):
+            return metadata
+
+        coredata = payload.get("full-text-retrieval-response", {}).get("coredata", {})
+        if not isinstance(coredata, dict):
+            coredata = {}
+
+        doi = str(coredata.get("prism:doi", "") or "").strip()
+        cover_date = normalize_date(str(coredata.get("prism:coverDate", "") or "").strip())
+        if cover_date:
+            metadata["date"] = cover_date
+
+        if doi:
+            doi_url = f"https://doi.org/{doi}"
+            crossref_metadata = fetch_metadata_from_crossref(doi_url)
+            if crossref_metadata.get("abstract"):
+                metadata["abstract"] = crossref_metadata.get("abstract", "")
+            if not metadata.get("date") and crossref_metadata.get("date"):
+                metadata["date"] = crossref_metadata.get("date", "")
+
+            if not metadata.get("abstract"):
+                openalex_metadata = fetch_metadata_from_openalex(doi_url)
+                if openalex_metadata.get("abstract"):
+                    metadata["abstract"] = openalex_metadata.get("abstract", "")
+                if not metadata.get("date") and openalex_metadata.get("date"):
+                    metadata["date"] = openalex_metadata.get("date", "")
+    except Exception:
+        return metadata
+
+    return metadata
+
+
 def is_challenge_page(page_text, page_soup):
     title_text = ""
     if page_soup and page_soup.title and page_soup.title.string:
         title_text = page_soup.title.string.strip().lower()
     text = (page_text or "").lower()
-    checks = ["just a moment", "cloudflare", "captcha", "access denied", "checking your browser"]
-    if any(marker in title_text for marker in checks):
+    title_checks = ["just a moment", "attention required", "captcha"]
+    body_checks = [
+        "checking your browser",
+        "verify you are human",
+        "cf-chl",
+        "cdn-cgi/challenge-platform",
+    ]
+    if any(marker in title_text for marker in title_checks):
         return True
-    return any(marker in text for marker in checks)
+    return any(marker in text for marker in body_checks)
+
+
+def extract_springer_metadata(page_soup, page_text):
+    metadata = {"abstract": "", "date": ""}
+    if not page_soup:
+        return metadata
+
+    # Springer/Springer Nature commonly exposes abstract in dedicated meta tags.
+    meta_candidates = [
+        ("name", "dc.description"),
+        ("name", "description"),
+        ("property", "og:description"),
+        ("name", "twitter:description"),
+        ("name", "citation_abstract"),
+    ]
+    for attr_name, attr_value in meta_candidates:
+        tag = page_soup.find("meta", attrs={attr_name: attr_value})
+        if tag and tag.get("content"):
+            candidate = re.sub(r"\s+", " ", str(tag.get("content") or "")).strip()
+            if candidate and not re.search(r"\bcookie\b|\bauthorize\b", candidate, re.IGNORECASE):
+                metadata["abstract"] = re.sub(r"^Abstract\s*", "", candidate, flags=re.IGNORECASE).strip()
+                break
+
+    if not metadata["abstract"]:
+        section_selectors = [
+            "section#Abs1",
+            "section[data-title='Abstract']",
+            "section.Abstract",
+            "div#Abs1-content",
+            "div.Abstract",
+        ]
+        for selector in section_selectors:
+            block = page_soup.select_one(selector)
+            if not block:
+                continue
+            candidate = re.sub(r"\s+", " ", block.get_text(" ", strip=True)).strip()
+            if candidate:
+                metadata["abstract"] = re.sub(r"^Abstract\s*", "", candidate, flags=re.IGNORECASE).strip()
+                break
+
+    # Date fields seen on Springer pages.
+    date_meta_candidates = [
+        ("name", "citation_online_date"),
+        ("name", "citation_publication_date"),
+        ("property", "article:published_time"),
+        ("name", "dc.date"),
+    ]
+    for attr_name, attr_value in date_meta_candidates:
+        tag = page_soup.find("meta", attrs={attr_name: attr_value})
+        if tag and tag.get("content"):
+            normalized = normalize_date(str(tag.get("content") or "").strip())
+            if normalized:
+                metadata["date"] = normalized
+                break
+
+    if not metadata["date"] and page_text:
+        date_match = re.search(r"Published:\s*([A-Za-z]+\s+\d{1,2},\s*\d{4})", page_text, re.IGNORECASE)
+        if date_match:
+            metadata["date"] = parse_human_readable_date(date_match.group(1))
+
+    return metadata
 
 
 def fetch_abstract_from_crossref(paper_url):
@@ -1710,7 +1866,7 @@ def fetch_metadata_from_paper_url(paper_url):
         return metadata
 
     cached = get_cached_metadata(paper_url)
-    if cached is not None:
+    if cached is not None and str(cached.get("abstract", "") or "").strip():
         return cached
 
     if is_arxiv_like_url(paper_url):
@@ -1755,7 +1911,17 @@ def fetch_metadata_from_paper_url(paper_url):
             put_cached_metadata(paper_url, metadata)
             return metadata
 
+        springer_metadata = extract_springer_metadata(paper_soup, paper_text)
+        if springer_metadata.get("abstract"):
+            metadata["abstract"] = springer_metadata.get("abstract", "")
+        if springer_metadata.get("date"):
+            metadata["date"] = springer_metadata.get("date", "")
+
         abstract_text = ""
+        if not abstract_text:
+            usenix_abstract = paper_soup.select_one("div.field-name-field-paper-description")
+            if usenix_abstract:
+                abstract_text = usenix_abstract.get_text(" ", strip=True)
         if not abstract_text:
             for script_tag in paper_soup.find_all("script", attrs={"type": "application/ld+json"}):
                 try:
@@ -1829,6 +1995,21 @@ def fetch_metadata_from_paper_url(paper_url):
             abstract_text = re.sub(r"\s*AI Summary\s*", " ", abstract_text, flags=re.IGNORECASE).strip()
         if not abstract_text:
             abstract_text = fetch_abstract_from_crossref(paper_url)
+
+        if not abstract_text:
+            redirect_target = extract_elsevier_redirect_target(paper_text)
+            pii = extract_pii_from_url(redirect_target) or extract_pii_from_url(paper_url)
+            if not pii:
+                pii_match = re.search(r'name="id"\s+value="([A-Z0-9]+)"', paper_text, re.IGNORECASE)
+                if pii_match:
+                    pii = pii_match.group(1).upper()
+            if pii:
+                elsevier_metadata = fetch_metadata_from_elsevier_pii(pii)
+                if elsevier_metadata.get("abstract"):
+                    abstract_text = elsevier_metadata.get("abstract", "")
+                if not metadata.get("date") and elsevier_metadata.get("date"):
+                    metadata["date"] = elsevier_metadata.get("date", "")
+
         metadata["abstract"] = abstract_text
 
         date_text = ""
@@ -1839,7 +2020,8 @@ def fetch_metadata_from_paper_url(paper_url):
             submitted_match = re.search(r"Submitted on (\d{1,2} \w+ \d{4})", paper_text, re.IGNORECASE)
             if submitted_match:
                 date_text = parse_human_readable_date(submitted_match.group(1))
-        metadata["date"] = date_text
+        if date_text:
+            metadata["date"] = date_text
 
         metadata["tags"] = []
 
@@ -2078,23 +2260,49 @@ def scrape_dblp_publications(url, include_arxiv=False, start_date=""):
     progress_lock = threading.Lock()
     total_items = len(publications)
     completed_items = 0
+    progress_phase = "enrich"
+    recover_done = 0
+    recover_total = 0
+    recover_recovered = 0
     last_progress_line_len = 0
 
-    def _render_progress_line(completed):
+    def _render_progress_line():
         nonlocal last_progress_line_len
+        with progress_lock:
+            snapshot_phase = progress_phase
+            snapshot_completed_items = completed_items
+            snapshot_recover_done = recover_done
+            snapshot_recover_total = recover_total
+            snapshot_recover_recovered = recover_recovered
+
         elapsed = max(0.0, time.time() - progress_started_at)
-        safe_total = max(1, total_items)
+        if snapshot_phase == "recover":
+            stage_label = "recover bibtex"
+            completed = snapshot_recover_done
+            stage_total = snapshot_recover_total
+        elif snapshot_phase == "finalize":
+            stage_label = "finalize"
+            completed = total_items
+            stage_total = total_items
+        else:
+            stage_label = "enrich metadata"
+            completed = snapshot_completed_items
+            stage_total = total_items
+
+        safe_total = max(1, stage_total)
         ratio = min(1.0, max(0.0, completed / safe_total))
         bar_width = 24
         filled = int(bar_width * ratio)
         bar = "#" * filled + "-" * (bar_width - filled)
 
         avg_seconds_per_item = (elapsed / completed) if completed > 0 else 6.0
-        remaining = max(0, total_items - completed)
+        remaining = max(0, stage_total - completed)
         eta_seconds = int(remaining * avg_seconds_per_item)
         elapsed_seconds = int(elapsed)
 
-        line_text = f"Progress [{bar}] {completed}/{total_items} elapsed:{elapsed_seconds}s eta:{eta_seconds}s"
+        line_text = f"Progress ({stage_label}) [{bar}] {completed}/{stage_total} elapsed:{elapsed_seconds}s eta:{eta_seconds}s"
+        if snapshot_phase == "recover":
+            line_text += f" recovered:{snapshot_recover_recovered}"
         padding = ""
         if last_progress_line_len > len(line_text):
             padding = " " * (last_progress_line_len - len(line_text))
@@ -2108,14 +2316,17 @@ def scrape_dblp_publications(url, include_arxiv=False, start_date=""):
 
     def _progress_loop():
         while not progress_stop_event.is_set():
-            with progress_lock:
-                snapshot_completed = completed_items
-            _render_progress_line(snapshot_completed)
+            _render_progress_line()
             if progress_stop_event.wait(1.0):
                 break
+        _render_progress_line()
+
+    def _on_recover_progress(done_count, total_count, recovered_count):
+        nonlocal recover_done, recover_total, recover_recovered
         with progress_lock:
-            snapshot_completed = completed_items
-        _render_progress_line(snapshot_completed)
+            recover_done = int(done_count)
+            recover_total = int(total_count)
+            recover_recovered = int(recovered_count)
 
     progress_thread = threading.Thread(target=_progress_loop, daemon=True)
     progress_thread.start()
@@ -2142,7 +2353,14 @@ def scrape_dblp_publications(url, include_arxiv=False, start_date=""):
                 with progress_lock:
                     completed_items += 1
 
-        recover_missing_bibtex_fields(publications)
+        with progress_lock:
+            progress_phase = "recover"
+            recover_done = 0
+            recover_total = 0
+            recover_recovered = 0
+        recover_missing_bibtex_fields(publications, progress_callback=_on_recover_progress)
+        with progress_lock:
+            progress_phase = "finalize"
     finally:
         progress_stop_event.set()
         progress_thread.join(timeout=2)
@@ -2371,47 +2589,22 @@ def load_tag_pool_with_cache(collection_dir, reference_file_path="", max_count=2
     if not signature:
         return [], "empty_source"
 
-    if cache_enabled and not force_refresh and os.path.exists(normalized_cache_path):
+    if cache_enabled and os.path.exists(normalized_cache_path):
         try:
             with open(normalized_cache_path, "r", encoding="utf-8") as f:
                 cached = json.load(f)
             if isinstance(cached, dict):
-                cached_signature = str(cached.get("signature", "") or "")
-                cached_source_mode = str(cached.get("source_mode", "collection") or "collection")
-                cached_source_path = str(cached.get("source_path", "") or "")
-                cached_max_count = int(cached.get("max_count", 0) or 0)
                 cached_tags = cached.get("tags", []) if isinstance(cached.get("tags", []), list) else []
-                if (
-                    cached_signature == signature
-                    and cached_source_mode == source_mode
-                    and os.path.normpath(cached_source_path) == normalized_source
-                    and cached_max_count == int(max_count)
-                ):
-                    return normalize_tag_list(cached_tags), "cache_hit"
+                normalized_tags = normalize_tag_list(cached_tags)
+                if max_count and int(max_count) > 0:
+                    normalized_tags = normalized_tags[: int(max_count)]
+                return normalized_tags, "cache_hit"
         except Exception:
-            pass
+            return [], "cache_read_error"
 
-    if source_mode == "file":
-        tags = load_tag_pool_from_file(reference_file_path, max_count=max_count)
-    else:
-        tags = load_tag_pool_from_collection(collection_dir, max_count=max_count)
-
-    if cache_enabled:
-        payload = {
-            "source_mode": source_mode,
-            "source_path": normalized_source,
-            "max_count": int(max_count),
-            "signature": signature,
-            "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            "tags": tags,
-        }
-        try:
-            with open(normalized_cache_path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
-
-    return tags, "cache_refresh"
+    if force_refresh:
+        return [], "cache_force_refresh_ignored"
+    return [], "cache_missing"
 
 
 def normalize_title_for_key(title):
@@ -2470,11 +2663,14 @@ def publication_dedup_key(publication):
 def build_dedup_index_from_js_files(reference_dir):
     dedup_keys = set()
     dedup_title_keys = set()
+    excluded_subdirs = {"auto-collected"}
 
     if not reference_dir or not os.path.isdir(reference_dir):
         return dedup_keys, dedup_title_keys
 
-    for root, _, files in os.walk(reference_dir):
+    for root, dirs, files in os.walk(reference_dir):
+        # Exclude auto-collected outputs from dedup reference scan.
+        dirs[:] = [d for d in dirs if d.lower() not in excluded_subdirs]
         for filename in files:
             if not filename.lower().endswith(".js"):
                 continue
@@ -2701,7 +2897,9 @@ def run_scrape_flow(
             os.path.join(os.path.dirname(os.path.abspath(__file__)), configured_dedup_reference_dir)
         )
     if not configured_dedup_reference_dir:
-        configured_dedup_reference_dir = os.path.dirname(os.path.abspath(js_filepath))
+        configured_dedup_reference_dir = os.path.normpath(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "collection")
+        )
 
     tag_collection_dir = str(TAGS_LLM_CONFIG.get("reference_collection_dir", "") or "").strip()
     tag_reference_js_path = str(TAGS_LLM_CONFIG.get("reference_js_path", "") or "").strip()
@@ -2738,6 +2936,7 @@ def run_scrape_flow(
             start_date=start_date,
         )
 
+        print("Stage: formatting publications...")
         # Format publications to match the required JSON and JS structure
         formatted_publications = format_publications(
             publications,
@@ -2758,11 +2957,13 @@ def run_scrape_flow(
             print(f"{index}. {title}")
             print(f"   content: {found_text}")
 
+        print("Stage: merging into target JS file...")
         merge_into_existing_js_file(
             js_filepath,
             formatted_publications,
             dedup_reference_dir=configured_dedup_reference_dir,
         )
+        print("Stage: saving metadata cache...")
         print(f"Publications saved to existing file: {js_filepath}")
         save_metadata_cache(_METADATA_CACHE_PATH)
         return 0

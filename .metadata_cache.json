@@ -140,8 +140,8 @@
     "tags": []
   },
   "doi:10.1007/s10664-024-10607-9": {
-    "abstract": "",
-    "date": "2025-05-01",
+    "abstract": "Android apps can hold secret strings of themselves such as cloud service credentials or encryption keys. Leakage of such secret strings can induce unprecedented consequences like monetary losses or leakage of user private information. In practice, various security issues were reported because many apps failed to protect their secrets. However, litte is known about the types, usages, exploitability, and consequences of app secret leakage issues. While a large body of literature has been devoted to studying user private information leakage, there is no systematic study characterizing app secret leakage issues. How far are Android app secrets from being stolen? To bridge this gap, we conducted the first systematic study to characterize app secret leakage issues in Android apps based on 575 potential app secrets sampled from 14,665 popular Android apps on Google Play. We summarized the common categories of leaked app secrets, assessed their security impacts and disclosed app bad practices in storing app secrets. We devised a text mining strategy using regular expressions and demonstrated that numerous app secrets can be easily stolen, even from the highly popular Android apps on Google. In a follow-up study, we harvested 3,711 distinct exploitable app secrets through automatic analysis. Our findings highlight the prevalence of this problem and call for greater attention to app secret protection.",
+    "date": "2025-04-02",
     "tags": []
   },
   "doi:10.1007/s10664-025-10685-3": {
@@ -450,7 +450,7 @@
     "tags": []
   },
   "doi:10.1016/j.jss.2023.111627": {
-    "abstract": "",
+    "abstract": "Millions of smart contracts have been deployed onto the Ethereum platform, posing potential attack subjects. Therefore, analyzing contract binaries is vital since their sources are unavailable, involving identification comprising function entry identification and detecting its boundaries. Such boundaries are critical to many smart contract applications, e.g. reverse engineering and profiling. Unfortunately, it is challenging to identify functions from these stripped contract binaries due to the lack of internal function call statements and the compiler-inducing instruction reshuffling. Recently, several existing works excessively relied on a set of handcrafted heuristic rules which impose several faults. To address this issue, we propose a novel neural network-based framework for EVM bytecode Function Entries and Boundaries Identification (neural-FEBI) that does not rely on a fixed set of handcrafted rules. Instead, it used a two-level bi-Long Short-Term Memory network and a Conditional Random Field network to locate the function entries. The suggested framework also devises a control flow traversal algorithm to determine the code segments reachable from the function entry as its boundary. Several experiments on 38,996 publicly available smart contracts collected as binary demonstrate that neural-FEBI confirms the lowest and highest F1-scores for the function entries identification task across different datasets of 88.3 to 99.7, respectively. Its performance on the function boundary identification task is also increased from 79.4% to 97.1% compared with state-of-the-art. We further demonstrate that the identified function information can be used to construct more accurate intra-procedural CFGs and call graphs. The experimental results confirm that the proposed framework significantly outperforms state-of-the-art, often based on handcrafted heuristic rules.",
     "date": "2023-05-01",
     "tags": []
   },
