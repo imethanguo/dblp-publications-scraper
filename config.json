@@ -8,7 +8,7 @@
   "_comment_3": "Start year filter: leave empty, or use YYYY",
   "start_date": "2020",
 
-  "_comment_4": "Absolute path to an existing .js file (must exist)",
+  "_comment_4": "Path to an existing .js file in this repo (must exist)",
   "existing_js_path": "/Users/guoyiheng/selected-publications/collection/auto-collected/auto_collected.js",
 
   "_comment_5": "Fast mode: speed-oriented mode (timeout/retry/cache strategy)",
@@ -16,9 +16,9 @@
 
   "_comment_6": "LLM-only venueShort mode (DeepSeek OpenAI-compatible API)",
   "venue_short_llm_base_url": "https://api.deepseek.com/v1",
-  "venue_short_llm_api_key": "sk-5ecbca1428924643af452e8e1d3f4394",
+  "venue_short_llm_api_key": "sk-e04896b9ad7e404797cd81e6235df852",
   "venue_short_llm_model": "deepseek-chat",
   "venue_short_llm_timeout_seconds": 20,
   "venue_short_llm_temperature": 0,
-  "venue_short_reference_js_path": "../collection/merged_collection(updateVenueShort&sorted).js"
+  "venue_short_reference_js_path": "./publications.template.js"
 }

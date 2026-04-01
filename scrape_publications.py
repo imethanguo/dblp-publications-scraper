@@ -12,6 +12,7 @@ import sys
 import signal
 import threading
 import hashlib
+import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
@@ -47,6 +48,7 @@ _METADATA_CACHE = {}
 _METADATA_CACHE_DIRTY = False
 _METADATA_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".metadata_cache.json")
 _TAGS_REFERENCE_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tags_reference_cache.json")
+_DEDUP_TITLE_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".dedup_title_cache.json")
 VENUE_SHORT_LLM_CONFIG = {
     "enabled": False,
     "base_url": "",
@@ -2416,6 +2418,54 @@ def load_js_array(filepath):
     return data
 
 
+def load_publication_array_for_index(filepath):
+    ext = os.path.splitext(filepath)[1].lower()
+
+    if ext == ".json":
+        return load_js_array(filepath)
+
+    if ext == ".js":
+        # First try strict JSON-style parsing for generated files.
+        try:
+            return load_js_array(filepath)
+        except Exception:
+            pass
+
+        # Fallback: execute JS module in a sandbox to support object-literal style files.
+        node_script = """
+const fs = require('fs');
+const path = require('path');
+const target = process.argv[1];
+try {
+  delete require.cache[require.resolve(target)];
+} catch (_) {}
+let data = require(target);
+if (!Array.isArray(data)) {
+  process.stdout.write('[]');
+  process.exit(0);
+}
+process.stdout.write(JSON.stringify(data));
+""".strip()
+        result = subprocess.run(
+            ["node", "-e", node_script, os.path.abspath(filepath)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise ValueError(f"Failed to load JS module for indexing: {filepath}")
+
+        payload = (result.stdout or "").strip()
+        if not payload:
+            return []
+        data = json.loads(payload)
+        if not isinstance(data, list):
+            return []
+        return data
+
+    return []
+
+
 def merge_unique_list(first_list, second_list):
     merged = []
     seen = set()
@@ -2533,12 +2583,16 @@ def load_tag_pool_from_file(reference_file_path, max_count=200):
     return merged
 
 
-def build_collection_file_signature(collection_dir):
+def build_collection_file_signature(collection_dir, excluded_subdirs=None):
     if not collection_dir or not os.path.isdir(collection_dir):
         return ""
 
+    excluded = {str(x).strip().lower() for x in (excluded_subdirs or set()) if str(x).strip()}
+
     rows = []
-    for root, _, files in os.walk(collection_dir):
+    for root, dirs, files in os.walk(collection_dir):
+        if excluded:
+            dirs[:] = [d for d in dirs if d.lower() not in excluded]
         for name in files:
             ext = os.path.splitext(name)[1].lower()
             if ext not in {".js", ".json"}:
@@ -2568,6 +2622,49 @@ def build_single_file_signature(reference_file_path):
         return ""
     text = f"{os.path.normpath(reference_file_path)}|{int(stat.st_mtime_ns)}|{int(stat.st_size)}"
     return hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def load_dedup_title_cache(reference_dir, signature, cache_path=""):
+    normalized_cache_path = str(cache_path or "").strip() or _DEDUP_TITLE_CACHE_PATH
+    if not os.path.exists(normalized_cache_path):
+        return None, "cache_missing"
+
+    try:
+        with open(normalized_cache_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        return None, "cache_read_error"
+
+    if not isinstance(payload, dict):
+        return None, "cache_invalid"
+
+    cached_source = os.path.normpath(str(payload.get("source_path", "") or ""))
+    cached_signature = str(payload.get("signature", "") or "")
+    if cached_source != os.path.normpath(reference_dir) or cached_signature != str(signature or ""):
+        return None, "cache_stale"
+
+    raw_titles = payload.get("title_keys", [])
+    if not isinstance(raw_titles, list):
+        return None, "cache_invalid"
+
+    title_keys = set()
+    for item in raw_titles:
+        key = str(item or "").strip().lower()
+        if key:
+            title_keys.add(key)
+    return title_keys, "cache_hit"
+
+
+def save_dedup_title_cache(reference_dir, signature, title_keys, cache_path=""):
+    normalized_cache_path = str(cache_path or "").strip() or _DEDUP_TITLE_CACHE_PATH
+    payload = {
+        "source_path": os.path.normpath(reference_dir),
+        "signature": str(signature or ""),
+        "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "title_keys": sorted(set(title_keys or [])),
+    }
+    with open(normalized_cache_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
 def load_tag_pool_with_cache(collection_dir, reference_file_path="", max_count=200, cache_path="", cache_enabled=True, force_refresh=False):
@@ -2668,15 +2765,21 @@ def build_dedup_index_from_js_files(reference_dir):
     if not reference_dir or not os.path.isdir(reference_dir):
         return dedup_keys, dedup_title_keys
 
+    signature = build_collection_file_signature(reference_dir, excluded_subdirs=excluded_subdirs)
+    if signature:
+        cached_titles, cache_status = load_dedup_title_cache(reference_dir, signature)
+        if cached_titles is not None:
+            print(f"Loaded dedup title cache: {len(cached_titles)} titles ({cache_status}).")
+            return dedup_keys, cached_titles
+
     for root, dirs, files in os.walk(reference_dir):
-        # Exclude auto-collected outputs from dedup reference scan.
         dirs[:] = [d for d in dirs if d.lower() not in excluded_subdirs]
         for filename in files:
-            if not filename.lower().endswith(".js"):
+            if not filename.lower().endswith((".js", ".json")):
                 continue
             file_path = os.path.join(root, filename)
             try:
-                publications = load_js_array(file_path)
+                publications = load_publication_array_for_index(file_path)
             except Exception:
                 continue
 
@@ -2688,6 +2791,13 @@ def build_dedup_index_from_js_files(reference_dir):
                 if title_key:
                     dedup_title_keys.add(title_key)
 
+    if signature:
+        try:
+            save_dedup_title_cache(reference_dir, signature, dedup_title_keys)
+            print(f"Refreshed dedup title cache: {len(dedup_title_keys)} titles.")
+        except Exception:
+            pass
+
     return dedup_keys, dedup_title_keys
 
 
@@ -2698,16 +2808,15 @@ def merge_into_existing_js_file(existing_js_filepath, new_publications, dedup_re
     merged_data = list(existing_publications)
     existing_keys, existing_title_keys = build_dedup_index_from_js_files(dedup_reference_dir)
 
-    # Fallback for backwards compatibility when reference dir is unavailable.
-    if not existing_keys and not existing_title_keys:
-        for item in existing_publications:
-            if not isinstance(item, dict):
-                continue
-            key = publication_dedup_key(item)
-            existing_keys.add(key)
-            title_key = normalize_title_for_key(item.get("title", ""))
-            if title_key:
-                existing_title_keys.add(title_key)
+    # Always include target auto_collected entries in dedup index.
+    for item in existing_publications:
+        if not isinstance(item, dict):
+            continue
+        key = publication_dedup_key(item)
+        existing_keys.add(key)
+        title_key = normalize_title_for_key(item.get("title", ""))
+        if title_key:
+            existing_title_keys.add(title_key)
 
     deduped_titles = []
     added_titles = []
@@ -2717,7 +2826,8 @@ def merge_into_existing_js_file(existing_js_filepath, new_publications, dedup_re
         key = publication_dedup_key(item)
         title = (item.get("title", "") or "").strip() or "(untitled)"
         title_key = normalize_title_for_key(item.get("title", ""))
-        if key in existing_keys or (title_key and title_key in existing_title_keys):
+        # Title match is treated as duplicate.
+        if (title_key and title_key in existing_title_keys) or key in existing_keys:
             deduped_titles.append(title)
             continue
 
