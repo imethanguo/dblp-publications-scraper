@@ -1,0 +1,24 @@
+{
+  "_comment_1": "DBLP author page URL",
+  "url": "https://dblp.org/pid/c/SCCheung.html",
+
+  "_comment_2": "Whether to include arXiv papers: true/false",
+  "include_arxiv": "false",
+
+  "_comment_3": "Start year filter: leave empty, or use YYYY",
+  "start_date": "2020",
+
+  "_comment_4": "Output JS path for GitHub Actions in selected-publications repo",
+  "existing_js_path": "../collection/auto-collected/auto_collected.js",
+
+  "_comment_5": "Fast mode: speed-oriented mode (timeout/retry/cache strategy)",
+  "fast_mode": true,
+
+  "_comment_6": "LLM venueShort settings (API key comes from GitHub Secret VENUE_SHORT_LLM_API_KEY)",
+  "venue_short_llm_base_url": "https://api.deepseek.com/v1",
+  "venue_short_llm_api_key": "",
+  "venue_short_llm_model": "deepseek-chat",
+  "venue_short_llm_timeout_seconds": 20,
+  "venue_short_llm_temperature": 0,
+  "venue_short_reference_js_path": "./publications.template.js"
+}
