@@ -2267,9 +2267,11 @@ def scrape_dblp_publications(url, include_arxiv=False, start_date=""):
     recover_total = 0
     recover_recovered = 0
     last_progress_line_len = 0
+    interactive_progress = bool(getattr(sys.stdout, "isatty", lambda: False)())
+    last_logged_snapshot = None
 
-    def _render_progress_line():
-        nonlocal last_progress_line_len
+    def _render_progress_line(final_line=False):
+        nonlocal last_progress_line_len, last_logged_snapshot
         with progress_lock:
             snapshot_phase = progress_phase
             snapshot_completed_items = completed_items
@@ -2305,23 +2307,34 @@ def scrape_dblp_publications(url, include_arxiv=False, start_date=""):
         line_text = f"Progress ({stage_label}) [{bar}] {completed}/{stage_total} elapsed:{elapsed_seconds}s eta:{eta_seconds}s"
         if snapshot_phase == "recover":
             line_text += f" recovered:{snapshot_recover_recovered}"
-        padding = ""
-        if last_progress_line_len > len(line_text):
-            padding = " " * (last_progress_line_len - len(line_text))
-        last_progress_line_len = len(line_text)
 
-        print(
-            f"\r{line_text}{padding}",
-            end="",
-            flush=True,
-        )
+        if interactive_progress:
+            padding = ""
+            if last_progress_line_len > len(line_text):
+                padding = " " * (last_progress_line_len - len(line_text))
+            last_progress_line_len = len(line_text)
+
+            print(
+                f"\r{line_text}{padding}",
+                end="",
+                flush=True,
+            )
+            if final_line:
+                print()
+            return
+
+        # In non-interactive logs, avoid writing the same status every second.
+        snapshot_key = (snapshot_phase, completed, stage_total, snapshot_recover_recovered)
+        if final_line or snapshot_key != last_logged_snapshot:
+            print(line_text, flush=True)
+            last_logged_snapshot = snapshot_key
 
     def _progress_loop():
         while not progress_stop_event.is_set():
             _render_progress_line()
             if progress_stop_event.wait(1.0):
                 break
-        _render_progress_line()
+        _render_progress_line(final_line=True)
 
     def _on_recover_progress(done_count, total_count, recovered_count):
         nonlocal recover_done, recover_total, recover_recovered
@@ -2366,7 +2379,8 @@ def scrape_dblp_publications(url, include_arxiv=False, start_date=""):
     finally:
         progress_stop_event.set()
         progress_thread.join(timeout=2)
-        print()
+        if interactive_progress:
+            print()
 
     for publication in publications:
         publication.pop("bibtexViewUrl", None)
