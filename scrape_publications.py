@@ -125,6 +125,7 @@ def load_venue_short_llm_config(raw_config):
     api_key = str(
         config_data.get("venue_short_llm_api_key", os.getenv("VENUE_SHORT_LLM_API_KEY", "")) or ""
     ).strip()
+    print("[DEBUG] LLM API KEY (first 5 chars):", api_key[:5] if api_key else "<empty>")
     model = str(
         config_data.get("venue_short_llm_model", os.getenv("VENUE_SHORT_LLM_MODEL", "")) or ""
     ).strip()
