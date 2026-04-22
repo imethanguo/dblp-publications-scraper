@@ -16,7 +16,6 @@
 
   "_comment_6": "LLM venueShort settings (API key comes from GitHub Secret VENUE_SHORT_LLM_API_KEY)",
   "venue_short_llm_base_url": "https://api.deepseek.com/v1",
-  "venue_short_llm_api_key": "",
   "venue_short_llm_model": "deepseek-chat",
   "venue_short_llm_timeout_seconds": 20,
   "venue_short_llm_temperature": 0,
