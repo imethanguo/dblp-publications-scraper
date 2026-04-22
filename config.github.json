@@ -6,7 +6,7 @@
   "include_arxiv": "false",
 
   "_comment_3": "Start year filter: leave empty, or use YYYY",
-  "start_date": "2025",
+  "start_date": "2020",
 
   "_comment_4": "Output JS path for GitHub Actions in selected-publications repo",
   "existing_js_path": "../collection/auto-collected/auto_collected.js",
