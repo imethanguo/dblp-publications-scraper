@@ -2172,8 +2172,27 @@ def scrape_dblp_publications(url, include_arxiv=False, start_date=""):
     author_bibtex_map = build_bibtex_map_for_author(url)
 
     # Find all publication entries
+
+    # 加载 collection 目录下所有已存在的 publication title（去重用）
+    import glob
+    existing_titles = set()
+
+    collection_dir = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "collection"))
+    auto_collected_dir = os.path.join(collection_dir, "auto-collected")
+    # 查重包括 collection/*.js 和 collection/auto-collected/*.js
+    for js_file in glob.glob(os.path.join(collection_dir, "*.js")) + glob.glob(os.path.join(auto_collected_dir, "*.js")):
+        try:
+            arr = load_publication_array_for_index(js_file)
+            for pub in arr:
+                t = str(pub.get("title", "")).strip().lower()
+                if t:
+                    existing_titles.add(t)
+        except Exception as exc:
+            print(f"[WARN] Failed to load {js_file}: {exc}")
+
     publications = []
     bibtex_view_urls = []
+    skipped_titles = []
     for entry in soup.find_all('li'):
         entry_text = entry.get_text(" ", strip=True)
         if re.match(r"^\s*\[d[^\]]*\]", entry_text, re.IGNORECASE):
@@ -2184,6 +2203,11 @@ def scrape_dblp_publications(url, include_arxiv=False, start_date=""):
             continue  # Skip entries without a title
 
         title = title_tag.text
+        title_key = str(title).strip().lower()
+        if title_key in existing_titles:
+            skipped_titles.append(title)
+            continue
+
         authors = [author.text for author in entry.find_all('span', itemprop='author')]
 
         paper_url = ""
@@ -2239,6 +2263,11 @@ def scrape_dblp_publications(url, include_arxiv=False, start_date=""):
         publications.append(publication)
         if bibtex_view_url:
             bibtex_view_urls.append(bibtex_view_url)
+
+    if skipped_titles:
+        print("[INFO] The following publications already exist in collection and will NOT be enriched by LLM API:")
+        for t in skipped_titles:
+            print("   -", t)
 
     def _enrich_single(pub):
         title = pub.get("title", "")
