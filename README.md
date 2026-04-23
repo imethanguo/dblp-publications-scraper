@@ -21,6 +21,7 @@
 - `requirements.txt`: Python dependencies
 - `.metadata_cache.json`: metadata cache (auto-generated)
 - `.tags_reference_cache.json`: tag vocabulary cach (auto-generated)
+- `.skip_cache.json`: skip cache (optional, user-managed)
 
 ## Requirements
 
@@ -57,6 +58,8 @@ Edit `config.json`, then run:
 - `venue_short_llm_timeout_seconds`: request timeout (seconds)
 - `venue_short_llm_temperature`: model temperature
 - `venue_short_reference_js_path`: reference JS file for learning venue->venueShort patterns in prompt
+- `skip_cache_enabled`: `true`/`false`, enable skip cache
+- `skip_cache_path`: path to a JSON array of skip keys (title:/doi:/arxiv:/url:)
 
 
 `venueShort` generation rule (LLM):

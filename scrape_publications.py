@@ -49,6 +49,7 @@ _METADATA_CACHE_DIRTY = False
 _METADATA_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".metadata_cache.json")
 _TAGS_REFERENCE_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tags_reference_cache.json")
 _DEDUP_TITLE_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".dedup_title_cache.json")
+_SKIP_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".skip_cache.json")
 VENUE_SHORT_LLM_CONFIG = {
     "enabled": False,
     "base_url": "",
@@ -847,6 +848,83 @@ def metadata_cache_key(paper_url):
     if doi:
         return f"doi:{doi.lower()}"
     return f"url:{text}"
+
+
+def normalize_skip_cache_key(raw_value):
+    text = str(raw_value or "").strip()
+    if not text:
+        return ""
+
+    lowered = text.lower()
+    for prefix in ("title:", "doi:", "arxiv:", "url:"):
+        if lowered.startswith(prefix):
+            value = text[len(prefix):].strip()
+            if prefix == "title:":
+                value = normalize_title_for_key(value)
+            elif prefix in {"doi:", "arxiv:"}:
+                value = value.lower()
+            if not value:
+                return ""
+            return f"{prefix}{value}"
+
+    title_key = normalize_title_for_key(text)
+    if not title_key:
+        return ""
+    return f"title:{title_key}"
+
+
+def load_skip_cache(cache_path, enabled=True):
+    if not enabled:
+        return set(), "disabled"
+
+    normalized_cache_path = str(cache_path or "").strip() or _SKIP_CACHE_PATH
+    if not os.path.exists(normalized_cache_path):
+        return set(), "missing"
+
+    try:
+        with open(normalized_cache_path, "r", encoding="utf-8") as cache_file:
+            payload = json.load(cache_file)
+    except Exception:
+        return set(), "read_error"
+
+    if not isinstance(payload, list):
+        return set(), "invalid"
+
+    keys = set()
+    for item in payload:
+        key = normalize_skip_cache_key(item)
+        if key:
+            keys.add(key)
+    return keys, "loaded"
+
+
+def extract_arxiv_id_from_url(url):
+    resolved = resolve_arxiv_abs_url_from_url(url)
+    if not resolved:
+        return ""
+    match = re.search(r"arxiv\.org/abs/([0-9]{4}\.[0-9]{4,5}(?:v\d+)?)", resolved, re.IGNORECASE)
+    if match:
+        return match.group(1).lower()
+    return ""
+
+
+def build_skip_keys_for_entry(title, paper_url="", arxiv_url=""):
+    keys = set()
+    title_key = normalize_title_for_key(title)
+    if title_key:
+        keys.add(f"title:{title_key}")
+
+    doi = extract_doi_from_url(paper_url)
+    if doi:
+        keys.add(f"doi:{doi.lower()}")
+
+    for candidate in (arxiv_url, paper_url):
+        if not candidate:
+            continue
+        arxiv_id = extract_arxiv_id_from_url(candidate)
+        if arxiv_id:
+            keys.add(f"arxiv:{arxiv_id}")
+    return keys
 
 
 def get_cached_metadata(paper_url):
@@ -2154,7 +2232,7 @@ def enrich_publication(publication, include_arxiv=False, start_date=""):
     return publication
 
 
-def scrape_dblp_publications(url, include_arxiv=False, start_date=""):
+def scrape_dblp_publications(url, include_arxiv=False, start_date="", skip_cache_keys=None):
     """
     Scrape publication information from the given DBLP author page URL.
 
@@ -2193,6 +2271,8 @@ def scrape_dblp_publications(url, include_arxiv=False, start_date=""):
     publications = []
     bibtex_view_urls = []
     skipped_titles = []
+    blocked_titles = []
+    skip_keys = set(skip_cache_keys or [])
     for entry in soup.find_all('li'):
         entry_text = entry.get_text(" ", strip=True)
         if re.match(r"^\s*\[d[^\]]*\]", entry_text, re.IGNORECASE):
@@ -2250,6 +2330,12 @@ def scrape_dblp_publications(url, include_arxiv=False, start_date=""):
             "dblpIssueUrl": issue_url,
         }
 
+        if skip_keys:
+            entry_keys = build_skip_keys_for_entry(title, paper_url=paper_url, arxiv_url=arxiv_url)
+            if entry_keys.intersection(skip_keys):
+                blocked_titles.append(title)
+                continue
+
         map_key = normalize_title_for_key(title)
         if map_key and map_key in author_bibtex_map:
             publication["bibtex"] = author_bibtex_map[map_key]
@@ -2267,6 +2353,11 @@ def scrape_dblp_publications(url, include_arxiv=False, start_date=""):
     if skipped_titles:
         print("[INFO] The following publications already exist in collection and will NOT be enriched by LLM API:")
         for t in skipped_titles:
+            print("   -", t)
+
+    if blocked_titles:
+        print("[INFO] The following publications were skipped due to skip cache:")
+        for t in blocked_titles:
             print("   -", t)
 
     def _enrich_single(pub):
@@ -2966,6 +3057,8 @@ def run_scrape_flow(
     fast_mode=False,
     dblp_request_interval_seconds=None,
     enable_metadata_cache=True,
+    skip_cache_enabled=True,
+    skip_cache_path="",
     venue_short_llm_config=None,
     tags_llm_config=None,
     dedup_reference_dir="",
@@ -3085,12 +3178,34 @@ def run_scrape_flow(
     else:
         print("Warning: No reference tags loaded from collection. LLM will generate tags without tag-pool guidance.")
 
+    normalized_skip_cache_path = str(skip_cache_path or "").strip()
+    if normalized_skip_cache_path and not os.path.isabs(normalized_skip_cache_path):
+        normalized_skip_cache_path = os.path.normpath(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), normalized_skip_cache_path)
+        )
+
+    skip_cache_keys, skip_cache_status = load_skip_cache(
+        normalized_skip_cache_path,
+        enabled=bool(skip_cache_enabled),
+    )
+    if skip_cache_keys:
+        print(
+            f"Loaded {len(skip_cache_keys)} skip-cache keys "
+            f"(status={skip_cache_status}, cache={normalized_skip_cache_path or _SKIP_CACHE_PATH})."
+        )
+    elif skip_cache_status != "disabled":
+        print(
+            f"Skip cache status: {skip_cache_status} "
+            f"(cache={normalized_skip_cache_path or _SKIP_CACHE_PATH})."
+        )
+
     try:
         load_metadata_cache(_METADATA_CACHE_PATH)
         publications, bibtex_view_urls = scrape_dblp_publications(
             url,
             include_arxiv=include_arxiv,
             start_date=start_date,
+            skip_cache_keys=skip_cache_keys,
         )
 
         print("Stage: formatting publications...")
@@ -3122,7 +3237,7 @@ def run_scrape_flow(
         )
         print("Stage: saving metadata cache...")
         print(f"Publications saved to existing file: {js_filepath}")
-        save_metadata_cache(_METADATA_CACHE_PATH)
+        save_metadata_cache(_METADATA_CACHE_PATH)   
         return 0
 
     except Exception as e:
@@ -3159,6 +3274,8 @@ def load_run_config(config_path):
         "fast_mode": bool(config_data.get("fast_mode", False)),
         "dblp_request_interval_seconds": config_data.get("dblp_request_interval_seconds", DBLP_REQUEST_INTERVAL_SECONDS),
         "enable_metadata_cache": bool(config_data.get("enable_metadata_cache", True)),
+        "skip_cache_enabled": bool(config_data.get("skip_cache_enabled", True)),
+        "skip_cache_path": str(config_data.get("skip_cache_path", "") or "").strip(),
         "dedup_reference_dir": str(config_data.get("dedup_reference_dir", "") or "").strip(),
         "venue_short_llm_config": load_venue_short_llm_config(config_data),
         "tags_llm_config": load_tags_llm_config(config_data),
@@ -3226,6 +3343,8 @@ def main():
         fast_mode=run_config["fast_mode"],
         dblp_request_interval_seconds=run_config["dblp_request_interval_seconds"],
         enable_metadata_cache=run_config["enable_metadata_cache"],
+        skip_cache_enabled=run_config["skip_cache_enabled"],
+        skip_cache_path=run_config["skip_cache_path"],
         venue_short_llm_config=run_config.get("venue_short_llm_config", {}),
         tags_llm_config=run_config.get("tags_llm_config", {}),
         dedup_reference_dir=run_config.get("dedup_reference_dir", ""),

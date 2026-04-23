@@ -6,7 +6,7 @@
   "include_arxiv": "false",
 
   "_comment_3": "Start year filter: leave empty, or use YYYY",
-  "start_date": "2020",
+  "start_date": "2024",
 
   "_comment_4": "Path to an existing .js file in this repo (must exist)",
   "existing_js_path": "/Users/guoyiheng/selected-publications/collection/auto-collected/auto_collected.js",
@@ -20,5 +20,9 @@
   "venue_short_llm_model": "deepseek-chat",
   "venue_short_llm_timeout_seconds": 20,
   "venue_short_llm_temperature": 0,
-  "venue_short_reference_js_path": "./publications.template.js"
+  "venue_short_reference_js_path": "./publications.template.js",
+
+  "_comment_7": "Skip cache: JSON array of titles or keys (title:/doi:/arxiv:/url:)",
+  "skip_cache_enabled": true,
+  "skip_cache_path": "./.skip_cache.json"
 }
