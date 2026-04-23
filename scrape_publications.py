@@ -2888,7 +2888,10 @@ def merge_into_existing_js_file(existing_js_filepath, new_publications, dedup_re
 
     save_to_js(merged_data, existing_js_filepath)
 
-    print(f"Merged into existing JS file: added {len(added_titles)}, deduplicated {len(deduped_titles)}.")
+
+    # 强制刷新 dedup cache，确保 dedup_title_cache.json 总是最新
+    build_dedup_index_from_js_files(dedup_reference_dir)
+    print(f"Merged into existing JS file: added {len(added_titles)}, deduplicated {len(deduped_titles)}. Dedup cache refreshed.")
     return merged_data
 
 
