@@ -20,7 +20,7 @@
   "venue_short_llm_model": "deepseek-chat",
   "venue_short_llm_timeout_seconds": 20,
   "venue_short_llm_temperature": 0,
-  "venue_short_reference_js_path": "./publications.template.js",
+  "venue_short_reference_js_path": "./venue_short_reference.json",
 
   "_comment_7": "Skip cache: JSON array of titles or keys (title:/doi:/arxiv:/url:)",
   "skip_cache_enabled": true,

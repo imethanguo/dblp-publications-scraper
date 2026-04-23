@@ -1,0 +1,437 @@
+[
+  {
+    "venue": "11th joint meeting of the European Software Engineering Conference and the ACM SIGSOFT Symposium on the Foundations of Software Engineering (ESEC/FSE 2017), Paderborn, Germany, Sept 2017",
+    "venueShort": "ESEC/FSE",
+    "count": 1
+  },
+  {
+    "venue": "2018 33rd ACM/IEEE International Conference on Automated Software Engineering (ASE '18), September 2018, Montpellier, France",
+    "venueShort": "ASE",
+    "count": 2
+  },
+  {
+    "venue": "24th ACM SIGSOFT International Symposium on the Foundations of Software Engineering (FSE 2016), Seattle, WA, USA, Nov 2016",
+    "venueShort": "FSE",
+    "count": 2
+  },
+  {
+    "venue": "26th ACM Joint European Software Engineering Conference and Symposium on the Foundations of Software Engineering (ESEC/FSE 2018), Lake Buena Vista, Florida, USA, Nov 2018",
+    "venueShort": "ESEC/FSE",
+    "count": 1
+  },
+  {
+    "venue": "29th IEEE/ACM International Conference on Automated Software Engineering (ASE 2014), Vasteras, Sweden, September 2014",
+    "venueShort": "ASE",
+    "count": 1
+  },
+  {
+    "venue": "31st IEEE/ACM International Conference on Automated Software Engineering (ASE 2016), Singapore, Sept 2016",
+    "venueShort": "ASE",
+    "count": 2
+  },
+  {
+    "venue": "31st USENIX Security Symposium",
+    "venueShort": "USENIX Security",
+    "count": 1
+  },
+  {
+    "venue": "32nd European Conference on Object-Oriented Programming (ECOOP 2018), Article 19",
+    "venueShort": "ECOOP",
+    "count": 1
+  },
+  {
+    "venue": "36th IEEE/ACM International Conference on Automated Software Engineering",
+    "venueShort": "ASE",
+    "count": 1
+  },
+  {
+    "venue": "36th International Conference on Software Engineering (ICSE 2014), Hyderabad, India, May-Jun 2014",
+    "venueShort": "ICSE",
+    "count": 2
+  },
+  {
+    "venue": "37th IEEE/ACM International Conference on Automated Software Engineering",
+    "venueShort": "ASE",
+    "count": 1
+  },
+  {
+    "venue": "37th International Conference on Software Engineering (ICSE 2015), Florence, Italy, May 16-24, 2015",
+    "venueShort": "ICSE",
+    "count": 1
+  },
+  {
+    "venue": "38th IEEE/ACM International Conference on Automated Software Engineering",
+    "venueShort": "ASE",
+    "count": 1
+  },
+  {
+    "venue": "38th International Conference on Software Engineering (ICSE 2016 - SEIP), Companion Volume, Austin, TX, USA, May 2016",
+    "venueShort": "ICSE SEIP",
+    "count": 1
+  },
+  {
+    "venue": "38th International Conference on Software Engineering (ICSE 2016), Austin, TX, USA, May 2016",
+    "venueShort": "ICSE",
+    "count": 2
+  },
+  {
+    "venue": "40th IEEE/ACM International Conference on Automated Software Engineering",
+    "venueShort": "ASE",
+    "count": 3
+  },
+  {
+    "venue": "40th International Conference on Software Engineering (ICSE 2018 Poster)",
+    "venueShort": "ICSE Poster",
+    "count": 1
+  },
+  {
+    "venue": "42nd International Conference on Software Engineering (NIER Track)",
+    "venueShort": "ICSE NIER",
+    "count": 1
+  },
+  {
+    "venue": "42nd International Conference on Software Engineering, Demo",
+    "venueShort": "ICSE Demo",
+    "count": 1
+  },
+  {
+    "venue": "43rd ACM SIGPLAN-SIGACT Symposium on Principles of Programming Languages (POPL 2016)",
+    "venueShort": "POPL",
+    "count": 1
+  },
+  {
+    "venue": "44th IEEE/ACM 44th International Conference on Software Engineering",
+    "venueShort": "ICSE",
+    "count": 3
+  },
+  {
+    "venue": "47th IEEE/ACM International Conference on Software Engineering",
+    "venueShort": "ICSE",
+    "count": 1
+  },
+  {
+    "venue": "ACM SIGSOFT International Symposium on Software Testing and Analysis",
+    "venueShort": "ISSTA",
+    "count": 2
+  },
+  {
+    "venue": "ACM Transactions on Internet Technology (TOIT)",
+    "venueShort": "TOIT",
+    "count": 1
+  },
+  {
+    "venue": "ACM Transactions on Software Engineering and Methodology",
+    "venueShort": "TOSEM",
+    "count": 9
+  },
+  {
+    "venue": "ACM Transactions on Software Engineering and Methodology 23(4), August 2014",
+    "venueShort": "TOSEM",
+    "count": 1
+  },
+  {
+    "venue": "Automated Software Engineering",
+    "venueShort": "ASEJ",
+    "count": 1
+  },
+  {
+    "venue": "Computer Aided Verification - 36th International Conference",
+    "venueShort": "CAV",
+    "count": 1
+  },
+  {
+    "venue": "Empirical Software Engineering",
+    "venueShort": "EMSE",
+    "count": 3
+  },
+  {
+    "venue": "Empirical Software Engineering 2019",
+    "venueShort": "EmSE",
+    "count": 1
+  },
+  {
+    "venue": "IEEE Conference on Software Testing",
+    "venueShort": "ICST",
+    "count": 1
+  },
+  {
+    "venue": "IEEE Internet of Things Journal 2019",
+    "venueShort": "IoT-J",
+    "count": 2
+  },
+  {
+    "venue": "IEEE Software 32(1), Jan/Feb 2015",
+    "venueShort": "IEEE SOFTWARE",
+    "count": 1
+  },
+  {
+    "venue": "IEEE Trans. Serv. Comput.",
+    "venueShort": "TSC",
+    "count": 3
+  },
+  {
+    "venue": "IEEE Transactions of Software Engineering 41(9), September 2015",
+    "venueShort": "TSE",
+    "count": 1
+  },
+  {
+    "venue": "IEEE Transactions on Circuits and Systems II: Express Briefs (TCAS2)",
+    "venueShort": "TCAS2",
+    "count": 1
+  },
+  {
+    "venue": "IEEE Transactions on Image Processing",
+    "venueShort": "TIP",
+    "count": 1
+  },
+  {
+    "venue": "IEEE Transactions on Services Computing 2019",
+    "venueShort": "TSC",
+    "count": 1
+  },
+  {
+    "venue": "IEEE Transactions on Software Engineering",
+    "venueShort": "TSE",
+    "count": 4
+  },
+  {
+    "venue": "IEEE Transactions on Software Engineering (TSE)",
+    "venueShort": "TSE",
+    "count": 2
+  },
+  {
+    "venue": "IEEE Transactions on Software Engineering 2020",
+    "venueShort": "TSE",
+    "count": 2
+  },
+  {
+    "venue": "IEEE Transactions on Software Engineering 2021",
+    "venueShort": "TSE",
+    "count": 1
+  },
+  {
+    "venue": "IEEE Transactions on Software Engineering 40(9), September 2014",
+    "venueShort": "TSE",
+    "count": 1
+  },
+  {
+    "venue": "IEEE/ACM International Conference on Automated Software Engineering",
+    "venueShort": "ASE",
+    "count": 2
+  },
+  {
+    "venue": "Information and Software Technology",
+    "venueShort": "INFSOF",
+    "count": 1
+  },
+  {
+    "venue": "Information and Software Technology (IST) 2016",
+    "venueShort": "IST",
+    "count": 1
+  },
+  {
+    "venue": "International Conference on Automated Software Engineering",
+    "venueShort": "ASE",
+    "count": 1
+  },
+  {
+    "venue": "International Conference on Data Engineering",
+    "venueShort": "ICDE",
+    "count": 1
+  },
+  {
+    "venue": "International Conference on Software Analysis, Evolution and Reengineering",
+    "venueShort": "SANER",
+    "count": 1
+  },
+  {
+    "venue": "International Conference on Software Engineering",
+    "venueShort": "ICSE",
+    "count": 1
+  },
+  {
+    "venue": "International Conference on Software Engineering 2019, Technical Research Paper, Montr\u00e9al, QC, Canada, 25 May - 31 May",
+    "venueShort": "ICSE",
+    "count": 3
+  },
+  {
+    "venue": "International Conference on Software Engineering, Technical Research Paper, Gothenburg, Sweden, May 27 - 3 June 2018",
+    "venueShort": "ICSE",
+    "count": 1
+  },
+  {
+    "venue": "International Journal of Software and Informatics (IJSI)",
+    "venueShort": "IJSI",
+    "count": 1
+  },
+  {
+    "venue": "International Symposium on Software Testing and Analysis (ISSTA 2014), San Jose, California, USA, July 2014",
+    "venueShort": "ISSTA",
+    "count": 1
+  },
+  {
+    "venue": "International Symposium on Software Testing and Analysis, Amsterdam Netherlands, July 2018",
+    "venueShort": "ISSTA",
+    "count": 1
+  },
+  {
+    "venue": "Journal of Empirical Software Engineering (EmSE 2018)",
+    "venueShort": "EmSE",
+    "count": 1
+  },
+  {
+    "venue": "Journal of Systems and Software",
+    "venueShort": "JSS",
+    "count": 1
+  },
+  {
+    "venue": "Journal of Systems and Software (JSS)",
+    "venueShort": "JSS",
+    "count": 1
+  },
+  {
+    "venue": "Journal of Systems and Software 156: 21-40 (2019)",
+    "venueShort": "JSS",
+    "count": 1
+  },
+  {
+    "venue": "Proceedings of 2018 33rd ACM/IEEE International Conference on Automated Software Engineering (ASE'18), September 3-7, 2018, Montpellier, France",
+    "venueShort": "ASE",
+    "count": 1
+  },
+  {
+    "venue": "Proceedings of the 25th International Symposium on Software Testing and Analysis (ISSTA 2016), Saarbr\u00fccken, Germany, July 2016",
+    "venueShort": "ISSTA",
+    "count": 1
+  },
+  {
+    "venue": "Proceedings of the 28th ACM Joint European SoftwareEngineering Conference and Symposium on the Foundations of Software Engineering (ESEC/FSE \u201920)",
+    "venueShort": "ESEC/FSE",
+    "count": 1
+  },
+  {
+    "venue": "Proceedings of the 29th ACM Joint European SoftwareEngineering Conference and Symposium on the Foundations of Software Engineering (ESEC/FSE \u201921)",
+    "venueShort": "ESEC/FSE",
+    "count": 2
+  },
+  {
+    "venue": "Proceedings of the 36th IEEE/ACM International Conference on Automated Software Engineering (ASE '21)",
+    "venueShort": "ASE",
+    "count": 1
+  },
+  {
+    "venue": "Proceedings of the 42rd International Conference on Software Engineering (ICSE \u201920)",
+    "venueShort": "ICSE",
+    "count": 1
+  },
+  {
+    "venue": "Proceedings of the 43rd International Conference on Software Engineering (ICSE \u201921)",
+    "venueShort": "ICSE",
+    "count": 1
+  },
+  {
+    "venue": "Proceedings of the ACM on Software Engineering",
+    "venueShort": "FSE",
+    "count": 3
+  },
+  {
+    "venue": "SCIENCE CHINA Information Sciences (SCIS) 58(5), May 2015",
+    "venueShort": "SCIS",
+    "count": 1
+  },
+  {
+    "venue": "Science of Computer Programming (SCP)",
+    "venueShort": "SCP",
+    "count": 1
+  },
+  {
+    "venue": "the 16th International Conference on Internetware",
+    "venueShort": "Internetware",
+    "count": 1
+  },
+  {
+    "venue": "the 30th USENIX Security Symposium, Vancouver, BC, Canada, Aug 11-13 2021",
+    "venueShort": "USENIX Security",
+    "count": 1
+  },
+  {
+    "venue": "the 31st ACM Joint European Software Engineering Conference and Symposium on the Foundations of Software Engineering",
+    "venueShort": "ESEC/FSE",
+    "count": 3
+  },
+  {
+    "venue": "the 32nd ACM SIGSOFT International Symposium on Software Testing and Analysis",
+    "venueShort": "ISSTA",
+    "count": 2
+  },
+  {
+    "venue": "The 32nd International Joint Conference on Artificial Intelligence",
+    "venueShort": "IJCAI",
+    "count": 1
+  },
+  {
+    "venue": "the 33rd ACM SIGSOFT International Symposium on Software Testing and Analysis",
+    "venueShort": "ISSTA",
+    "count": 1
+  },
+  {
+    "venue": "The 36th IEEE/ACM International Conference on Automated Software Engineering",
+    "venueShort": "ASE",
+    "count": 1
+  },
+  {
+    "venue": "the 39th IEEE/ACM International Conference on Automated Software Engineering",
+    "venueShort": "ASE",
+    "count": 1
+  },
+  {
+    "venue": "The 45th IEEE Symposium on Security and Privacy",
+    "venueShort": "S&P",
+    "count": 1
+  },
+  {
+    "venue": "the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers)",
+    "venueShort": "ACL",
+    "count": 2
+  },
+  {
+    "venue": "the 8th IEEE/ACM International Conference on Mobile Software Engineering and Systems, Madrid, Spain, May 17-19 2021",
+    "venueShort": "MOBILESoft",
+    "count": 1
+  },
+  {
+    "venue": "The ACM Joint European Software Engineering Conference and Symposium on the Foundations of Software Engineering 2019, Technical Research Paper, Tallinn, Estonia",
+    "venueShort": "ESEC/FSE",
+    "count": 1
+  },
+  {
+    "venue": "The ACM Joint European Software Engineering Conference and Symposium on the Foundations of Software Engineering, Technical Research Paper, Lake Buena Vista, Florida, 4 Nov - 9 Nov 2018",
+    "venueShort": "ESEC/FSE",
+    "count": 2
+  },
+  {
+    "venue": "The Journal of Systems and Software (JSS)",
+    "venueShort": "JSS",
+    "count": 2
+  },
+  {
+    "venue": "Thirty-Ninth AAAI Conference on Artificial Intelligence",
+    "venueShort": "AAAI",
+    "count": 1
+  },
+  {
+    "venue": "Transactions of Software Engineering 2021",
+    "venueShort": "TSE",
+    "count": 1
+  },
+  {
+    "venue": "Transactions on Software Engineering",
+    "venueShort": "TSE",
+    "count": 1
+  },
+  {
+    "venue": "USENIX Security Symposium",
+    "venueShort": "USENIX Security",
+    "count": 1
+  }
+]
