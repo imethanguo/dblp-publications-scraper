@@ -2535,6 +2535,15 @@ def save_to_js(data, filename):
         json.dump(data, f, ensure_ascii=False, indent=4)
 
 
+def sort_publications_by_year_desc(publications):
+    def year_key(publication):
+        date_text = str(publication.get("date", "") or "")
+        match = re.match(r"^(\d{4})", date_text)
+        return int(match.group(1)) if match else -1
+
+    return sorted(publications, key=year_key, reverse=True)
+
+
 def load_js_array(filepath):
     if not os.path.exists(filepath):
         return []
@@ -2955,6 +2964,56 @@ def merge_into_existing_js_file(existing_js_filepath, new_publications, dedup_re
 
     deduped_titles = []
     added_titles = []
+    def extract_year(pub):
+        try:
+            date_text = str(pub.get("date", "") or "")
+            m = re.match(r"^(\d{4})", date_text)
+            return int(m.group(1)) if m else None
+        except Exception:
+            return None
+
+    def find_insertion_index_by_year(data_list, year):
+        # Build year ranges (start index of each year and end index)
+        ranges = []  # list of (year, start_idx, end_idx)
+        cur_year = None
+        start_idx = None
+        for idx, itm in enumerate(data_list):
+            y = extract_year(itm)
+            if y != cur_year:
+                if cur_year is not None:
+                    ranges.append((cur_year, start_idx, idx - 1))
+                cur_year = y
+                start_idx = idx
+        if cur_year is not None:
+            ranges.append((cur_year, start_idx, len(data_list) - 1))
+
+        # If data_list empty, insert at beginning
+        if not ranges:
+            return 0
+
+        # If there's already the same year, insert at that year's start (become first)
+        for y, s, e in ranges:
+            if y == year:
+                return s
+
+        # Prefer inserting after year+1 block if present
+        target = year + 1 if year is not None else None
+        if target is not None:
+            for y, s, e in ranges:
+                if y == target:
+                    return e + 1
+
+        # Find the minimal existing year greater than target year
+        greater_years = [y for (y, s, e) in ranges if y is not None and year is not None and y > year]
+        if greater_years:
+            chosen = min(greater_years)
+            for y, s, e in ranges:
+                if y == chosen:
+                    return e + 1
+
+        # If no greater year found, place at beginning (most recent)
+        return 0
+
     for item in new_publications:
         if not isinstance(item, dict):
             continue
@@ -2971,12 +3030,19 @@ def merge_into_existing_js_file(existing_js_filepath, new_publications, dedup_re
         if not isinstance(item.get("awards"), list):
             item["awards"] = []
 
-        merged_data.append(item)
+        # Insert into merged_data at the correct year position so that within the same year
+        # the new item becomes the first one. If the year's block doesn't exist, try to
+        # insert after year+1 block; otherwise after the nearest greater year, or at
+        # the beginning if no greater year exists.
+        year = extract_year(item)
+        insert_idx = find_insertion_index_by_year(merged_data, year)
+        merged_data.insert(insert_idx, item)
         existing_keys.add(key)
         if title_key:
             existing_title_keys.add(title_key)
         added_titles.append(title)
 
+    merged_data = sort_publications_by_year_desc(merged_data)
     save_to_js(merged_data, existing_js_filepath)
 
 
