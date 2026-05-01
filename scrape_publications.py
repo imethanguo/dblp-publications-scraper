@@ -24,6 +24,8 @@ except Exception:
 REQUEST_TIMEOUT = 5.0
 REQUEST_RETRIES = 3
 RETRY_SLEEP_SECONDS = 2.0
+SCRAPE_RUN_RETRIES = 3
+SCRAPE_RUN_RETRY_DELAY_SECONDS = 180
 METADATA_REQUEST_TIMEOUT = REQUEST_TIMEOUT
 METADATA_REQUEST_RETRIES = REQUEST_RETRIES
 METADATA_RETRY_SLEEP_SECONDS = RETRY_SLEEP_SECONDS
@@ -3343,6 +3345,11 @@ def load_run_config(config_path):
         "skip_cache_enabled": bool(config_data.get("skip_cache_enabled", True)),
         "skip_cache_path": str(config_data.get("skip_cache_path", "") or "").strip(),
         "dedup_reference_dir": str(config_data.get("dedup_reference_dir", "") or "").strip(),
+        "scrape_run_retries": config_data.get("scrape_run_retries", SCRAPE_RUN_RETRIES),
+        "scrape_run_retry_delay_seconds": config_data.get(
+            "scrape_run_retry_delay_seconds",
+            SCRAPE_RUN_RETRY_DELAY_SECONDS,
+        ),
         "venue_short_llm_config": load_venue_short_llm_config(config_data),
         "tags_llm_config": load_tags_llm_config(config_data),
     }
@@ -3399,22 +3406,51 @@ def main():
 
     print(f"Using config file: {config_path}")
 
-    exit_code = run_scrape_flow(
-        run_config["url"],
-        run_config["include_arxiv_input"],
-        run_config["start_date_input"],
-        existing_js_path=run_config["existing_js_path"],
-        max_workers=run_config["max_workers"],
-        per_item_sleep_seconds=run_config["per_item_sleep_seconds"],
-        fast_mode=run_config["fast_mode"],
-        dblp_request_interval_seconds=run_config["dblp_request_interval_seconds"],
-        enable_metadata_cache=run_config["enable_metadata_cache"],
-        skip_cache_enabled=run_config["skip_cache_enabled"],
-        skip_cache_path=run_config["skip_cache_path"],
-        venue_short_llm_config=run_config.get("venue_short_llm_config", {}),
-        tags_llm_config=run_config.get("tags_llm_config", {}),
-        dedup_reference_dir=run_config.get("dedup_reference_dir", ""),
-    )
+    retries_raw = run_config.get("scrape_run_retries", SCRAPE_RUN_RETRIES)
+    delay_raw = run_config.get("scrape_run_retry_delay_seconds", SCRAPE_RUN_RETRY_DELAY_SECONDS)
+    try:
+        retries = max(1, int(retries_raw))
+    except Exception:
+        retries = SCRAPE_RUN_RETRIES
+    try:
+        retry_delay_seconds = max(0, int(float(delay_raw)))
+    except Exception:
+        retry_delay_seconds = SCRAPE_RUN_RETRY_DELAY_SECONDS
+
+    exit_code = 1
+    for attempt in range(1, retries + 1):
+        exit_code = run_scrape_flow(
+            run_config["url"],
+            run_config["include_arxiv_input"],
+            run_config["start_date_input"],
+            existing_js_path=run_config["existing_js_path"],
+            max_workers=run_config["max_workers"],
+            per_item_sleep_seconds=run_config["per_item_sleep_seconds"],
+            fast_mode=run_config["fast_mode"],
+            dblp_request_interval_seconds=run_config["dblp_request_interval_seconds"],
+            enable_metadata_cache=run_config["enable_metadata_cache"],
+            skip_cache_enabled=run_config["skip_cache_enabled"],
+            skip_cache_path=run_config["skip_cache_path"],
+            venue_short_llm_config=run_config.get("venue_short_llm_config", {}),
+            tags_llm_config=run_config.get("tags_llm_config", {}),
+            dedup_reference_dir=run_config.get("dedup_reference_dir", ""),
+        )
+        if exit_code == 0:
+            break
+        if attempt < retries:
+            print(
+                f"Scrape attempt {attempt}/{retries} failed. "
+                f"Retrying in {retry_delay_seconds} seconds..."
+            )
+            if retry_delay_seconds:
+                time.sleep(retry_delay_seconds)
+        else:
+            print(
+                f"Scrape failed after {retries} attempts. "
+                "Skipping scrape and treating as no changes."
+            )
+            sys.exit(0)
+
     if exit_code != 0:
         sys.exit(exit_code)
 
