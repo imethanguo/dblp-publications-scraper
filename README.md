@@ -61,6 +61,8 @@ Edit `config.json`, then run:
 - `venue_short_reference_js_path`: reference JS file for learning venue->venueShort patterns
 - `skip_cache_enabled`: `true`/`false`, enable skip cache
 - `skip_cache_path`: path to a JSON array of skip keys (title:/doi:/arxiv:/url:)
+- `scrape_run_retries`: retry count for the whole scrape run
+- `scrape_run_retry_delay_seconds`: delay between retries (seconds)
 
 `venueShort` generation rule (LLM):
 

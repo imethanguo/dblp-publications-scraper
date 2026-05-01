@@ -24,5 +24,9 @@
 
   "_comment_7": "Skip cache: JSON array of titles or keys (title:/doi:/arxiv:/url:)",
   "skip_cache_enabled": true,
-  "skip_cache_path": "./.skip_cache.json"
+  "skip_cache_path": "./.skip_cache.json",
+
+  "_comment_8": "Retry whole scrape run when it fails",
+  "scrape_run_retries": 3,
+  "scrape_run_retry_delay_seconds": 180
 }
